@@ -1,0 +1,11 @@
+[package]
+name = "rust-dl-cli"
+version = "0.1.0"
+description = "Command-line bootstrapper for rust-dl"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rust-dl-core = { path = "../core" }
+tokio.workspace = true

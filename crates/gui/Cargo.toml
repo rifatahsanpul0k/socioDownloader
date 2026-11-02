@@ -1,0 +1,14 @@
+[package]
+name = "rust-dl-gui"
+version = "0.1.0"
+description = "Native desktop interface for rust-dl"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+arboard.workspace = true
+dirs.workspace = true
+eframe.workspace = true
+rust-dl-core = { path = "../core" }
+tokio.workspace = true
