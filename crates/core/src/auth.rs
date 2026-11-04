@@ -5,6 +5,13 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AuthError {
+    #[error("unsupported browser '{0}'")]
+    UnsupportedBrowser(String),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,7 +38,7 @@ impl fmt::Display for BrowserKind {
 }
 
 impl FromStr for BrowserKind {
-    type Err = String;
+    type Err = AuthError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -41,7 +48,7 @@ impl FromStr for BrowserKind {
             "brave" => Ok(Self::Brave),
             "firefox" => Ok(Self::Firefox),
             "edge" | "microsoft-edge" => Ok(Self::Edge),
-            other => Err(format!("unsupported browser '{other}'")),
+            other => Err(AuthError::UnsupportedBrowser(other.to_owned())),
         }
     }
 }

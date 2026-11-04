@@ -28,12 +28,12 @@ download managed yt-dlp and FFmpeg sidecars into
 ## CLI usage
 
 ```sh
-cargo run -p rust-dl-cli -- bootstrap
-cargo run -p rust-dl-cli -- resolve <URL> [--playlist]
-cargo run -p rust-dl-cli -- download <URL> [--playlist] [--format ID] [--output DIR]
-cargo run -p rust-dl-cli -- resolve <URL> --cookies-from-browser safari
-cargo run -p rust-dl-cli -- download <URL> --cookies /path/to/cookies.txt
-cargo run -p rust-dl-cli -- update
+cargo run -p downloader-cli -- bootstrap
+cargo run -p downloader-cli -- resolve <URL> [--playlist]
+cargo run -p downloader-cli -- download <URL> [--playlist] [--format ID] [--output DIR]
+cargo run -p downloader-cli -- resolve <URL> --cookies-from-browser safari
+cargo run -p downloader-cli -- download <URL> --cookies /path/to/cookies.txt
+cargo run -p downloader-cli -- update
 ```
 
 Batch input may contain multiple URLs separated by whitespace, commas, or
@@ -47,9 +47,12 @@ expanded automatically.
 cargo run -p rust-dl-gui
 ```
 
-Paste with **Paste & Download** or Cmd+V, enable clipboard capture, or drag a
-URL/text file into the window. The toolbar controls cookie sources, quality,
-concurrency, playlist/carousel expansion, and yt-dlp updates.
+Built with `eframe`/`egui` strictly following Apple Human Interface Guidelines (HIG) and Jakob Nielsen's Usability Heuristics:
+- **macOS Window Shell**: Transparent titlebar with Cocoa traffic light insets and San Francisco (SF Pro) typography.
+- **Pre-Queue Staging Card**: Interactive card showing video thumbnail, duration, uploader, stream badges (`Highest Quality 1080p Video + High-Res Audio`, `🎬 H.264 + 🎵 AAC`), and automatic pre-download disk space verification.
+- **Three-Stage Visual Progress**: Distinct dynamic phases (Probing, Multi-chunk Downloading, FFmpeg Muxing, and Completed).
+- **Actionable Error Recovery**: Plain-language error masking with one-click cookie authentication shortcuts for protected media.
+- **Non-intrusive Toasts & History**: Automatic clipboard link detection notification and 5-second undo toast for completed downloads.
 
 ## macOS `.app` bundle
 
@@ -57,7 +60,7 @@ Build the release GUI and create `rust-dl.app` with:
 
 ```sh
 cargo build --workspace --release
-cargo run -p rust-dl-cli -- bundle-app --output-dir dist
+cargo run -p downloader-cli -- bundle-app --output-dir dist
 ```
 
 The command creates `dist/rust-dl.app/Contents` with `MacOS/rust-dl`,

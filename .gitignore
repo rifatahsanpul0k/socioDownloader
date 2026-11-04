@@ -1,2 +1,36 @@
+# Rust build artifacts
 /target/
+**/*.rs.bk
+*.bk
+
+# Distribution and release binaries
+/dist/
+*.dmg
+*.zip
+*.tar.gz
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor & IDE directories
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Temporary download files and sidecar caches
+*.part
+*.ytdl
+*.tmp
+bin/
+
+# Tooling and agent artifacts
 /graphify-out/
+.agents/
+.gemini/

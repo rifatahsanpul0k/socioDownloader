@@ -33,14 +33,21 @@ pub enum CoreError {
 
     #[error(transparent)]
     Queue(#[from] queue::QueueError),
+
+    #[error(transparent)]
+    Auth(#[from] auth::AuthError),
+
+    #[error(transparent)]
+    Storage(#[from] storage::StorageError),
 }
 
-pub use auth::{BrowserKind, CookieSource};
+pub use auth::{AuthError, BrowserKind, CookieSource};
 pub use resolver::{MediaManifest, MediaStream, Platform, Resolver, StreamDelivery};
 pub use sidecar::{
-    BinaryVersions, DownloadProgress, SidecarError, SidecarManager, SidecarUpdateReport,
-    FFMPEG_BINARY_NAME, YT_DLP_BINARY_NAME,
+    create_default_client, BinaryVersions, DownloadProgress, SidecarError, SidecarManager,
+    SidecarUpdateReport, FFMPEG_BINARY_NAME, YT_DLP_BINARY_NAME,
 };
+pub use storage::StorageError;
 
 impl From<resolver::ResolverError> for CoreError {
     fn from(error: resolver::ResolverError) -> Self {

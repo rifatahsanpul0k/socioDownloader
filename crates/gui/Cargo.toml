@@ -10,5 +10,10 @@ rust-version.workspace = true
 arboard.workspace = true
 dirs.workspace = true
 eframe.workspace = true
+image.workspace = true
+libc.workspace = true
+raw-window-handle.workspace = true
+reqwest.workspace = true
 rust-dl-core = { path = "../core" }
 tokio.workspace = true
+window-vibrancy.workspace = true

@@ -113,6 +113,31 @@ async fn resolve_with_options(
     let output = command.output().await.map_err(ResolverError::ProcessIo)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if cookie_source.is_some() && is_cookie_extraction_error(&stderr) {
+            let mut retry_cmd = Command::new(sidecar.binary_path(YT_DLP_BINARY_NAME));
+            retry_cmd
+                .args([
+                    "--dump-single-json",
+                    "--no-warnings",
+                    "--socket-timeout",
+                    "15",
+                ])
+                .kill_on_drop(true)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if allow_playlist {
+                retry_cmd.args(["--yes-playlist", "--playlist-end"]);
+                retry_cmd.arg(max_playlist_items.max(1).to_string());
+            } else {
+                retry_cmd.arg("--no-playlist");
+            }
+            retry_cmd.arg(sanitized.url.as_str());
+            if let Ok(retry_output) = retry_cmd.output().await {
+                if retry_output.status.success() {
+                    return parse_manifests(&retry_output.stdout, sanitized.platform);
+                }
+            }
+        }
         if let Some(message) = authentication_message(&stderr) {
             return Err(ResolverError::AuthenticationRequired {
                 platform: sanitized.platform,
@@ -122,6 +147,16 @@ async fn resolve_with_options(
         return Err(ResolverError::YtDlpFailed { stderr });
     }
     parse_manifests(&output.stdout, sanitized.platform)
+}
+
+fn is_cookie_extraction_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("could not extract cookies")
+        || lower.contains("cookie database")
+        || (lower.contains("cookie")
+            && (lower.contains("permission denied")
+                || lower.contains("operation not permitted")
+                || lower.contains("locked")))
 }
 
 pub fn parse_manifest(json: &[u8], platform: Platform) -> Result<MediaManifest, ResolverError> {
@@ -236,10 +271,19 @@ fn authentication_message(stderr: &str) -> Option<String> {
     let patterns = [
         "login required",
         "sign in to confirm",
+        "sign in to confirm your age",
+        "sign in to confirm you're not a bot",
+        "sign in to confirm you’re not a bot",
         "rate-limit reached",
         "instagram api is not granting access",
         "cookies",
+        "cookie",
         "private video",
+        "members-only",
+        "join this channel",
+        "bot verification",
+        "http error 429",
+        "http error 403",
     ];
     patterns
         .iter()
@@ -356,20 +400,21 @@ fn audio_quality(format: &ParsedFormat) -> (u8, i64, i64) {
     )
 }
 
-fn stream_quality(stream: &MediaStream) -> i64 {
+fn stream_quality(stream: &MediaStream) -> (i64, u8, u8, i64, i64) {
     let resolution = stream
         .resolution
         .as_deref()
         .map(resolution_height)
-        .unwrap_or_default();
-    if resolution > 0 {
-        return i64::from(resolution) * 100 + i64::from(stream.fps.unwrap_or_default() as u32);
-    }
-    if stream.vcodec.is_none() && stream.acodec.is_some() {
-        1
-    } else {
-        0
-    }
+        .unwrap_or_default() as i64;
+    let fps = stream.fps.unwrap_or_default() as i64;
+    let delivery_priority = match stream.delivery {
+        StreamDelivery::SplitDash { .. } => 3,
+        StreamDelivery::Direct { .. } => 2,
+        StreamDelivery::Hls { .. } => 1,
+    };
+    let is_mp4 = u8::from(stream.container == "mp4" || stream.container == "m4a");
+    let filesize = stream.filesize_bytes.unwrap_or_default() as i64;
+    (resolution, delivery_priority, is_mp4, fps, filesize)
 }
 
 fn resolution_height(value: &str) -> u32 {

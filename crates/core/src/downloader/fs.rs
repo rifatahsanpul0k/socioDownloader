@@ -98,6 +98,42 @@ pub fn auxiliary_part_path(output: &Path, suffix: &str) -> PathBuf {
     append_suffix(output, &format!(".{suffix}.part"))
 }
 
+/// RAII guard that automatically cleans up in-flight temporary `.part` files
+/// when dropped, unless explicitly disarmed. This guarantees `.part` file
+/// cleanup even on cancellation, panic, or unhandled task drops.
+#[derive(Debug, Default)]
+pub struct PartCleanupGuard {
+    paths: Vec<PathBuf>,
+    disarmed: bool,
+}
+
+impl PartCleanupGuard {
+    pub fn new() -> Self {
+        Self {
+            paths: Vec::new(),
+            disarmed: false,
+        }
+    }
+
+    pub fn track(&mut self, path: impl Into<PathBuf>) {
+        self.paths.push(path.into());
+    }
+
+    pub fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for PartCleanupGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            for path in &self.paths {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 pub async fn create_directory(path: &Path) -> Result<(), FsError> {
     fs::create_dir_all(path)
         .await

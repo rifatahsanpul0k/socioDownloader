@@ -503,6 +503,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "downloader-cli"
+version = "0.1.0"
+dependencies = [
+ "rust-dl-core",
+ "tokio",
+]
+
+[[package]]
 name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1140,6 +1148,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2112,14 +2122,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust-dl-cli"
-version = "0.1.0"
-dependencies = [
- "rust-dl-core",
- "tokio",
-]
-
-[[package]]
 name = "rust-dl-core"
 version = "0.1.0"
 dependencies = [
@@ -2141,8 +2143,13 @@ dependencies = [
  "arboard",
  "dirs",
  "eframe",
+ "image",
+ "libc",
+ "raw-window-handle",
+ "reqwest",
  "rust-dl-core",
  "tokio",
+ "window-vibrancy",
 ]
 
 [[package]]
@@ -3174,6 +3181,16 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "window-vibrancy"
+version = "0.5.2"
+dependencies = [
+ "objc2 0.5.3",
+ "objc2-app-kit 0.2.2",
+ "objc2-foundation 0.2.2",
+ "raw-window-handle",
+]
 
 [[package]]
 name = "windows-link"

@@ -17,8 +17,6 @@ pub use sanitizer::extract_batch_urls;
 pub use sanitizer::Platform;
 pub use types::{MediaManifest, MediaStream, StreamDelivery};
 
-const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
-
 #[derive(Debug, Error)]
 pub enum ResolverError {
     #[error("invalid URL: {0}")]
@@ -53,12 +51,13 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new(sidecar: SidecarManager) -> Result<Self, ResolverError> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .user_agent(BROWSER_USER_AGENT)
-            .build()
-            .map_err(|error| ResolverError::Client(error.to_string()))?;
+        Self::new_with_client(sidecar.client().clone(), sidecar)
+    }
+
+    pub fn new_with_client(
+        client: reqwest::Client,
+        sidecar: SidecarManager,
+    ) -> Result<Self, ResolverError> {
         Ok(Self {
             client,
             sidecar,

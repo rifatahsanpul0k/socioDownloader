@@ -442,11 +442,11 @@ impl QueueManager {
         let chosen = format_id.or(job.selected_format_id);
         let selected_format_id = chosen.clone();
         let stream = match chosen {
-            Some(format_id) => manifest
+            Some(format_id) if format_id != "best" => manifest
                 .streams
                 .iter()
                 .find(|stream| stream.format_id == format_id),
-            None => manifest.streams.first(),
+            _ => manifest.streams.first(),
         }
         .ok_or_else(|| QueueError::FormatNotFound {
             job_id: id,

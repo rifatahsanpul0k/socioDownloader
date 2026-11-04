@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
 
 use reqwest::Client;
 use tokio::fs as tokio_fs;
@@ -17,9 +16,6 @@ use super::DownloadError;
 use crate::resolver::{MediaManifest, MediaStream, StreamDelivery};
 use crate::sidecar::{SidecarManager, FFMPEG_BINARY_NAME};
 
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15";
-
 #[derive(Clone)]
 pub struct DownloadEngine {
     http: HttpDownloader,
@@ -28,14 +24,13 @@ pub struct DownloadEngine {
 
 impl DownloadEngine {
     pub fn new(sidecar: SidecarManager) -> Result<Self, DownloadError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .user_agent(USER_AGENT)
-            .build()
-            .map_err(|error| DownloadError::Ffmpeg {
-                stderr: format!("could not build HTTP client: {error}"),
-            })?;
+        Self::new_with_client(sidecar.client().clone(), sidecar)
+    }
+
+    pub fn new_with_client(
+        client: Client,
+        sidecar: SidecarManager,
+    ) -> Result<Self, DownloadError> {
         Ok(Self {
             http: HttpDownloader::new(client).with_max_connections(6),
             sidecar,
@@ -110,6 +105,8 @@ impl DownloadEngine {
             StreamDelivery::Direct { url } => {
                 reporter.emit(DownloadPhase::Downloading, true).await;
                 let part = fs::part_path(output);
+                let mut guard = fs::PartCleanupGuard::new();
+                guard.track(&part);
                 map_http(
                     self.http
                         .download(
@@ -123,6 +120,7 @@ impl DownloadEngine {
                         .await,
                 )?;
                 rename_part(&part, output).await?;
+                guard.disarm();
                 Ok(output.to_path_buf())
             }
             StreamDelivery::SplitDash {
@@ -132,6 +130,12 @@ impl DownloadEngine {
                 reporter.emit(DownloadPhase::Downloading, true).await;
                 let video_part = fs::auxiliary_part_path(output, "video");
                 let audio_part = fs::auxiliary_part_path(output, "audio");
+                let mux_part = fs::auxiliary_part_path(output, "mux");
+                let mut guard = fs::PartCleanupGuard::new();
+                guard.track(&video_part);
+                guard.track(&audio_part);
+                guard.track(&mux_part);
+
                 map_http(
                     self.http
                         .download(
@@ -160,7 +164,6 @@ impl DownloadEngine {
                     return Err(DownloadError::Cancelled);
                 }
                 reporter.emit(DownloadPhase::Muxing, true).await;
-                let mux_part = fs::auxiliary_part_path(output, "mux");
                 run_ffmpeg(
                     &self.sidecar.binary_path(FFMPEG_BINARY_NAME),
                     vec![
@@ -184,11 +187,17 @@ impl DownloadEngine {
                 )
                 .await?;
                 rename_part(&mux_part, output).await?;
+                fs::remove_if_present(&video_part).await;
+                fs::remove_if_present(&audio_part).await;
+                guard.disarm();
                 Ok(output.to_path_buf())
             }
             StreamDelivery::Hls { manifest_url } => {
                 reporter.emit(DownloadPhase::Muxing, true).await;
                 let mux_part = fs::auxiliary_part_path(output, "mux");
+                let mut guard = fs::PartCleanupGuard::new();
+                guard.track(&mux_part);
+
                 let mut args = vec!["-y".to_owned()];
                 if let Some(headers) = ffmpeg_headers(&stream.headers) {
                     args.extend(["-headers".to_owned(), headers]);
@@ -216,6 +225,7 @@ impl DownloadEngine {
                 )
                 .await?;
                 rename_part(&mux_part, output).await?;
+                guard.disarm();
                 Ok(output.to_path_buf())
             }
         }

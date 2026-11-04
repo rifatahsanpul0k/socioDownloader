@@ -68,12 +68,13 @@ async fn resolve(
     cookie_source: CookieSource,
     allow_playlist: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let manager = SidecarManager::new()?;
+    let client = rust_dl_core::create_default_client()?;
+    let manager = SidecarManager::new_with_client(client.clone())?;
     let (progress_tx, progress_rx) = mpsc::channel(1);
     drop(progress_rx);
     manager.ensure_binaries(progress_tx).await?;
 
-    let resolver = Resolver::new(manager)?;
+    let resolver = Resolver::new_with_client(client, manager)?;
     let started = Instant::now();
     let manifests = resolver
         .resolve_all(url, &cookie_source, allow_playlist)
@@ -93,7 +94,7 @@ async fn download_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = arguments
         .next()
-        .ok_or("usage: rust-dl-cli download <URL> [--format <FORMAT_ID>] [--output <DIR>]")?;
+        .ok_or("usage: downloader-cli download <URL> [--format <FORMAT_ID>] [--output <DIR>]")?;
     let mut requested_format = None;
     let mut output_directory = None;
     let mut cookie_source = CookieSource::None;
@@ -126,15 +127,16 @@ async fn download_command(
         }
     }
 
-    let manager = SidecarManager::new()?;
+    let client = rust_dl_core::create_default_client()?;
+    let manager = SidecarManager::new_with_client(client.clone())?;
     let (bootstrap_sender, bootstrap_receiver) = mpsc::channel(1);
     drop(bootstrap_receiver);
     manager.ensure_binaries(bootstrap_sender).await?;
-    let resolver = Resolver::new(manager.clone())?;
+    let resolver = Resolver::new_with_client(client.clone(), manager.clone())?;
     let manifests = resolver
         .resolve_all(&url, &cookie_source, allow_playlist)
         .await?;
-    let engine = DownloadEngine::new(manager)?;
+    let engine = DownloadEngine::new_with_client(client, manager)?;
     for manifest in manifests {
         let stream = choose_stream(&manifest, requested_format.as_deref())?;
         download_manifest(&engine, &manifest, stream, output_directory.as_deref()).await?;
@@ -262,12 +264,12 @@ fn choose_stream<'a>(
     requested_format: Option<&str>,
 ) -> Result<&'a MediaStream, Box<dyn std::error::Error>> {
     match requested_format {
-        Some(format_id) => manifest
+        Some(format_id) if format_id != "best" => manifest
             .streams
             .iter()
             .find(|stream| stream.format_id == format_id)
             .ok_or_else(|| format!("format '{format_id}' was not found").into()),
-        None => manifest
+        _ => manifest
             .streams
             .first()
             .ok_or_else(|| "resolver returned no streams".into()),

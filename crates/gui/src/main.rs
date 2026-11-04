@@ -1,17 +1,19 @@
+mod queue_view;
+mod staging;
+mod theme;
+
 use std::collections::HashMap;
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use eframe::egui::{Color32, RichText};
+use eframe::egui::RichText;
 use rust_dl_core::clipboard::spawn_clipboard_watcher;
-use rust_dl_core::downloader::{DownloadEngine, DownloadProgress as MediaDownloadProgress};
+use rust_dl_core::downloader::DownloadEngine;
 use rust_dl_core::queue::{JobId, JobStatus, QueueEvent, QueueJob, QueueManager};
 use rust_dl_core::storage::{current_epoch_secs, AppConfig, HistoryEntry, HistoryStore};
-use rust_dl_core::{
-    BrowserKind, CookieSource, MediaManifest, Resolver, SidecarManager, StreamDelivery,
-};
+use rust_dl_core::{BrowserKind, CookieSource, Resolver, SidecarManager};
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{mpsc, watch};
 
@@ -39,6 +41,7 @@ impl QualityMode {
 struct RuntimeBundle {
     handle: Handle,
     queue: QueueManager,
+    resolver: Resolver,
     sidecar: SidecarManager,
     config: AppConfig,
     history: HistoryStore,
@@ -47,7 +50,11 @@ struct RuntimeBundle {
 struct RustDlApp {
     handle: Handle,
     queue: QueueManager,
+    resolver: Resolver,
     sidecar: SidecarManager,
+    staging: staging::StagingState,
+    staging_sender: std_mpsc::Sender<staging::StagingEvent>,
+    staging_receiver: std_mpsc::Receiver<staging::StagingEvent>,
     input: String,
     quality: QualityMode,
     auto_capture: bool,
@@ -56,6 +63,7 @@ struct RustDlApp {
     history: HistoryStore,
     show_history: bool,
     jobs: HashMap<JobId, QueueJob>,
+    #[allow(dead_code)]
     selected_formats: HashMap<JobId, String>,
     event_receiver: std_mpsc::Receiver<QueueEvent>,
     clipboard_receiver: std_mpsc::Receiver<String>,
@@ -67,13 +75,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bundle = start_runtime()?;
     let app = RustDlApp::new(bundle);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([920.0, 720.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+            .with_titlebar_buttons_shown(true)
+            .with_transparent(true)
+            .with_inner_size([960.0, 720.0])
+            .with_min_inner_size([760.0, 520.0]),
         ..Default::default()
     };
     eframe::run_native(
         "rust-dl",
         options,
-        Box::new(move |_creation_context| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            theme::setup_system_fonts(&cc.egui_ctx);
+            theme::apply_macos_vibrancy(cc);
+            theme::configure_visuals(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )?;
     Ok(())
 }
@@ -97,7 +117,7 @@ fn start_runtime() -> Result<RuntimeBundle, Box<dyn std::error::Error>> {
                 .with_max_playlist_items(config.max_playlist_items);
             let engine = DownloadEngine::new(sidecar.clone()).map_err(|error| error.to_string())?;
             let queue = QueueManager::new(
-                resolver,
+                resolver.clone(),
                 engine,
                 config.download_dir.clone(),
                 config.max_concurrent_downloads,
@@ -106,6 +126,7 @@ fn start_runtime() -> Result<RuntimeBundle, Box<dyn std::error::Error>> {
             Ok::<RuntimeBundle, String>(RuntimeBundle {
                 handle: runtime.handle().clone(),
                 queue,
+                resolver,
                 sidecar,
                 config,
                 history,
@@ -150,6 +171,8 @@ impl RustDlApp {
             }
         });
 
+        let (staging_sender, staging_receiver) = std_mpsc::channel();
+
         let status = Arc::new(Mutex::new("Checking media tools...".to_owned()));
         let bootstrap_status = Arc::clone(&status);
         let sidecar = bundle.sidecar.clone();
@@ -167,7 +190,11 @@ impl RustDlApp {
         Self {
             handle: bundle.handle,
             queue: bundle.queue,
+            resolver: bundle.resolver,
             sidecar: bundle.sidecar,
+            staging: staging::StagingState::Idle,
+            staging_sender,
+            staging_receiver,
             input: String::new(),
             quality: quality_from_preset(&bundle.config.quality_preset),
             auto_capture: bundle.config.auto_clipboard,
@@ -184,6 +211,60 @@ impl RustDlApp {
         }
     }
 
+    fn start_staging(&mut self, url: String) {
+        let url = url.trim().to_owned();
+        if url.is_empty() {
+            return;
+        }
+        self.staging = staging::StagingState::Probing {
+            url: url.clone(),
+            started_at: std::time::Instant::now(),
+        };
+        let resolver = self.resolver.clone();
+        let sender = self.staging_sender.clone();
+        let cookie_source = self.config.cookie_source.clone();
+        self.handle.spawn(async move {
+            let cookie_ref = match &cookie_source {
+                CookieSource::None => None,
+                source => Some(source),
+            };
+            match resolver.resolve_with_cookies(&url, cookie_ref).await {
+                Ok(manifest) => {
+                    let thumbnail = if let Some(ref thumb_url) = manifest.thumbnail_url {
+                        let client = match reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(5))
+                            .build()
+                        {
+                            Ok(c) => c,
+                            Err(_) => reqwest::Client::new(),
+                        };
+                        match client.get(thumb_url).send().await {
+                            Ok(resp) => match resp.bytes().await {
+                                Ok(b) => Some(b.to_vec()),
+                                Err(_) => None,
+                            },
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let _ = sender.send(staging::StagingEvent::Success {
+                        url,
+                        manifest,
+                        thumbnail,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(staging::StagingEvent::Error {
+                        url,
+                        error: error.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    #[allow(dead_code)]
     fn enqueue_input(&self, input: String) {
         let queue = self.queue.clone();
         let quality = self.quality;
@@ -228,7 +309,7 @@ impl RustDlApp {
             Ok(text) => {
                 self.input = text.trim().to_owned();
                 if !self.input.is_empty() {
-                    self.enqueue_input(self.input.clone());
+                    self.start_staging(self.input.clone());
                 }
             }
             Err(error) => set_status(&self.status, &format!("Clipboard unavailable: {error}")),
@@ -258,9 +339,54 @@ impl RustDlApp {
                 }
             }
         }
+        while let Ok(event) = self.staging_receiver.try_recv() {
+            match event {
+                staging::StagingEvent::Success {
+                    url,
+                    manifest,
+                    thumbnail,
+                } => {
+                    if let staging::StagingState::Probing {
+                        url: probing_url, ..
+                    } = &self.staging
+                    {
+                        if probing_url == &url {
+                            let default_format = match staging::select_default_format_id(&manifest) {
+                                Some(f) => f,
+                                None => "best".to_string(),
+                            };
+                            let stream_size = manifest
+                                .streams
+                                .iter()
+                                .find(|s| s.format_id == default_format)
+                                .and_then(|s| s.filesize_bytes);
+                            let disk_check =
+                                staging::check_disk_space(&self.config.download_dir, stream_size);
+                            self.staging = staging::StagingState::Staged {
+                                url,
+                                manifest,
+                                thumbnail,
+                                selected_format_id: default_format,
+                                disk_check,
+                            };
+                        }
+                    }
+                }
+                staging::StagingEvent::Error { url, error } => {
+                    if let staging::StagingState::Probing {
+                        url: probing_url, ..
+                    } = &self.staging
+                    {
+                        if probing_url == &url {
+                            self.staging = staging::StagingState::Error { url, error };
+                        }
+                    }
+                }
+            }
+        }
         while let Ok(url) = self.clipboard_receiver.try_recv() {
             if self.auto_capture {
-                self.enqueue_input(url);
+                self.start_staging(url);
             }
         }
     }
@@ -353,16 +479,16 @@ impl RustDlApp {
         let dropped = context.input(|input| input.raw.dropped_files.clone());
         for file in dropped {
             if file.name.starts_with("http://") || file.name.starts_with("https://") {
-                self.enqueue_input(file.name);
+                self.start_staging(file.name);
             } else if let Some(path) = file.path {
                 if path.to_string_lossy().starts_with("http://")
                     || path.to_string_lossy().starts_with("https://")
                 {
-                    self.enqueue_input(path.to_string_lossy().into_owned());
+                    self.start_staging(path.to_string_lossy().into_owned());
                     continue;
                 }
                 match std::fs::read_to_string(&path) {
-                    Ok(contents) => self.enqueue_input(contents),
+                    Ok(contents) => self.start_staging(contents),
                     Err(error) => set_status(
                         &self.status,
                         &format!("Could not read dropped file: {error}"),
@@ -370,7 +496,7 @@ impl RustDlApp {
                 }
             } else if let Some(bytes) = file.bytes {
                 match String::from_utf8(bytes.to_vec()) {
-                    Ok(contents) => self.enqueue_input(contents),
+                    Ok(contents) => self.start_staging(contents),
                     Err(_) => set_status(&self.status, "Dropped data was not UTF-8 text"),
                 }
             }
@@ -388,21 +514,33 @@ impl RustDlApp {
         });
         for text in pasted {
             if !text.trim().is_empty() {
-                self.enqueue_input(text);
+                self.start_staging(text);
             }
         }
     }
 }
 
 impl eframe::App for RustDlApp {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if visuals.dark_mode {
+            [0.118, 0.118, 0.118, 1.0]
+        } else {
+            [0.965, 0.965, 0.965, 1.0]
+        }
+    }
+
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.handle_dropped_input(context);
         let mut input_focused = false;
+        egui::TopBottomPanel::top("top_header")
+            .exact_height(theme::HEADER_HEIGHT)
+            .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
+            .show(context, |ui| {
+                theme::render_macos_top_header(ui, "rust-dl");
+            });
         egui::TopBottomPanel::top("top_bar").show(context, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("rust-dl");
-                ui.separator();
                 ui.label(status_text(&self.status));
             });
             ui.horizontal(|ui| {
@@ -412,6 +550,12 @@ impl eframe::App for RustDlApp {
                         .desired_width(500.0),
                 );
                 input_focused = input.has_focus();
+                if (input.lost_focus() || input_focused) && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    let text = self.input.trim().to_owned();
+                    if !text.is_empty() {
+                        self.start_staging(text);
+                    }
+                }
                 if ui.button("Paste & Download").clicked() {
                     self.paste_and_download();
                 }
@@ -491,31 +635,142 @@ impl eframe::App for RustDlApp {
         egui::CentralPanel::default().show(context, |ui| {
             if self.show_history {
                 self.render_history(ui);
-            } else if self.jobs.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Paste a link to start downloading");
-                });
             } else {
-                if self.jobs.len() > 1 {
-                    ui.horizontal(|ui| {
-                        if ui.button("Clear Completed").clicked() {
-                            let queue = self.queue.clone();
-                            self.handle.spawn(async move {
-                                let _ = queue.clear_completed();
-                            });
-                        }
-                        if ui.button("Cancel All").clicked() {
-                            let queue = self.queue.clone();
-                            self.handle.spawn(async move {
-                                let _ = queue.cancel_all();
-                            });
-                        }
+                if !self.staging.is_idle() {
+                    let queue = self.queue.clone();
+                    let handle = self.handle.clone();
+                    let allow_playlists = self.allow_playlists;
+                    staging::render_staging_card(ui, &mut self.staging, |url, format_id| {
+                        handle.spawn(async move {
+                            match queue.enqueue_batch_for_selection(url.clone(), allow_playlists).await {
+                                Ok(job_ids) => {
+                                    for id in job_ids {
+                                        let _ = queue.start_job(id, Some(format_id.clone()));
+                                    }
+                                }
+                                Err(_) => {
+                                    let _ = queue.enqueue_batch_auto(url, None, false, allow_playlists).await;
+                                }
+                            }
+                        });
                     });
+                    ui.add_space(12.0);
                 }
-                let mut jobs: Vec<QueueJob> = self.jobs.values().cloned().collect();
-                jobs.sort_by_key(|job| job.id);
-                for job in jobs {
-                    self.render_job_card(ui, job);
+
+                if self.jobs.is_empty() && self.staging.is_idle() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(60.0);
+                        ui.heading(RichText::new("rust-dl").size(24.0).strong());
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Ultra-lightweight macOS Media Downloader")
+                                .size(14.0)
+                                .color(theme::TEXT_SECONDARY_DARK),
+                        );
+                        ui.add_space(20.0);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("📋 Paste & Download (⌘V)").size(14.0),
+                                )
+                                .min_size(egui::vec2(220.0, 38.0)),
+                            )
+                            .clicked()
+                        {
+                            self.paste_and_download();
+                        }
+                        ui.add_space(16.0);
+                        ui.label(
+                            RichText::new(
+                                "Supports YouTube (4K/1080p DASH with audio), Instagram, and direct media URLs",
+                            )
+                            .size(12.0)
+                            .color(theme::TEXT_SECONDARY_DARK),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("🎬 Auto DASH Video + Audio Muxing")
+                                    .size(11.0)
+                                    .color(theme::COLOR_ACCENT_BLUE),
+                            );
+                            ui.label(
+                                RichText::new("•")
+                                    .size(11.0)
+                                    .color(theme::TEXT_SECONDARY_DARK),
+                            );
+                            ui.label(
+                                RichText::new("⚡ Multi-chunk Parallel Range Workers")
+                                    .size(11.0)
+                                    .color(theme::COLOR_ACCENT_GREEN),
+                            );
+                        });
+                    });
+                } else if !self.jobs.is_empty() {
+                    if self.jobs.len() > 1 {
+                        ui.horizontal(|ui| {
+                            if ui.button("Clear Completed").clicked() {
+                                let queue = self.queue.clone();
+                                self.handle.spawn(async move {
+                                    let _ = queue.clear_completed();
+                                });
+                            }
+                            if ui.button("Cancel All").clicked() {
+                                let queue = self.queue.clone();
+                                self.handle.spawn(async move {
+                                    let _ = queue.cancel_all();
+                                });
+                            }
+                        });
+                    }
+                    let mut jobs: Vec<QueueJob> = self.jobs.values().cloned().collect();
+                    jobs.sort_by_key(|job| job.id);
+                    for job in jobs {
+                        let queue = self.queue.clone();
+                        let handle = self.handle.clone();
+                        let on_retry = {
+                            let queue = queue.clone();
+                            let handle = handle.clone();
+                            move |id| {
+                                handle.spawn(async move {
+                                    let _ = queue.retry_job(id);
+                                });
+                            }
+                        };
+                        let on_cancel = {
+                            let queue = queue.clone();
+                            let handle = handle.clone();
+                            move |id| {
+                                handle.spawn(async move {
+                                    let _ = queue.cancel_job(id);
+                                });
+                            }
+                        };
+                        let on_remove = {
+                            let queue = queue.clone();
+                            let handle = handle.clone();
+                            move |id| {
+                                handle.spawn(async move {
+                                    let _ = queue.remove_job(id);
+                                });
+                            }
+                        };
+                        let on_open_cookies = {
+                            let status = Arc::clone(&self.status);
+                            move || {
+                                set_status(&status, "Select a Browser Cookie source in Settings above");
+                            }
+                        };
+
+                        queue_view::render_queue_card_full(
+                            ui,
+                            &job,
+                            on_retry,
+                            on_cancel,
+                            on_remove,
+                            on_open_cookies,
+                        );
+                    }
                 }
             }
         });
@@ -608,161 +863,11 @@ impl RustDlApp {
                             .status();
                     }
                     if ui.button("Re-download").clicked() {
-                        self.enqueue_input(entry.url.clone());
+                        self.start_staging(entry.url.clone());
                     }
                 });
             });
         }
-    }
-
-    fn render_job_card(&mut self, ui: &mut egui::Ui, job: QueueJob) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(platform_label(job.platform))
-                        .strong()
-                        .color(Color32::LIGHT_BLUE),
-                );
-                ui.label(job.title.as_deref().unwrap_or(&job.url));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("#{}", job.id));
-                });
-            });
-            match &job.status {
-                JobStatus::Queued => {
-                    ui.label("Queued");
-                }
-                JobStatus::Resolving => {
-                    ui.label("Resolving metadata...");
-                }
-                JobStatus::Ready { manifest } => {
-                    self.render_ready(ui, &job, manifest);
-                }
-                JobStatus::Downloading { progress } => {
-                    render_progress(ui, progress);
-                    if ui.button("Cancel").clicked() {
-                        let queue = self.queue.clone();
-                        let id = job.id;
-                        self.handle.spawn(async move {
-                            let _ = queue.cancel_job(id);
-                        });
-                    }
-                }
-                JobStatus::Completed { output_path } => {
-                    ui.label("Completed");
-                    if ui.button("Reveal in Finder").clicked() {
-                        let _ = std::process::Command::new("open")
-                            .arg("-R")
-                            .arg(output_path)
-                            .status();
-                    }
-                }
-                JobStatus::Failed { error } => {
-                    ui.colored_label(Color32::LIGHT_RED, error);
-                    if error
-                        .to_ascii_lowercase()
-                        .contains("authentication required")
-                    {
-                        ui.colored_label(
-                            Color32::YELLOW,
-                            "Auth required — select a Browser Cookie source above and click Retry",
-                        );
-                    }
-                    if ui.button("Retry").clicked() {
-                        let queue = self.queue.clone();
-                        let id = job.id;
-                        self.handle.spawn(async move {
-                            let _ = queue.retry_job(id);
-                        });
-                    }
-                }
-                JobStatus::Cancelled => {
-                    ui.label("Cancelled");
-                    if ui.button("Retry").clicked() {
-                        let queue = self.queue.clone();
-                        let id = job.id;
-                        self.handle.spawn(async move {
-                            let _ = queue.retry_job(id);
-                        });
-                    }
-                }
-            }
-            if ui.button("Remove").clicked() {
-                let queue = self.queue.clone();
-                let id = job.id;
-                self.handle.spawn(async move {
-                    let _ = queue.remove_job(id);
-                });
-            }
-        });
-        ui.add_space(8.0);
-    }
-
-    fn render_ready(&mut self, ui: &mut egui::Ui, job: &QueueJob, manifest: &MediaManifest) {
-        let selected = self.selected_formats.entry(job.id).or_insert_with(|| {
-            manifest
-                .streams
-                .first()
-                .map(|stream| stream.format_id.clone())
-                .unwrap_or_default()
-        });
-        egui::ComboBox::from_id_salt(("format", job.id))
-            .selected_text(selected.clone())
-            .show_ui(ui, |ui| {
-                for stream in &manifest.streams {
-                    let label = format!(
-                        "{} · {} · {}",
-                        stream.format_id,
-                        stream.resolution.as_deref().unwrap_or("audio"),
-                        delivery_label(&stream.delivery)
-                    );
-                    ui.selectable_value(selected, stream.format_id.clone(), label);
-                }
-            });
-        if ui.button("Download").clicked() {
-            let queue = self.queue.clone();
-            let id = job.id;
-            let format_id = selected.clone();
-            self.handle.spawn(async move {
-                let _ = queue.start_job(id, Some(format_id));
-            });
-        }
-    }
-}
-
-fn render_progress(ui: &mut egui::Ui, progress: &MediaDownloadProgress) {
-    let fraction = progress
-        .total_bytes
-        .filter(|total| *total > 0)
-        .map(|total| progress.downloaded_bytes as f32 / total as f32)
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-    ui.add(egui::ProgressBar::new(fraction).text(format!(
-        "{:.0}% · {:.2} MB/s · ETA {}",
-        fraction * 100.0,
-        progress.speed_bytes_per_sec / 1_048_576.0,
-        progress
-            .eta_secs
-            .map(|seconds| format!("{seconds}s"))
-            .unwrap_or_else(|| "--".to_owned())
-    )));
-}
-
-fn platform_label(platform: rust_dl_core::Platform) -> &'static str {
-    match platform {
-        rust_dl_core::Platform::YouTube => "YouTube",
-        rust_dl_core::Platform::Instagram => "Instagram",
-        rust_dl_core::Platform::Facebook => "Facebook",
-        rust_dl_core::Platform::Pinterest => "Pinterest",
-        rust_dl_core::Platform::Generic => "Direct",
-    }
-}
-
-fn delivery_label(delivery: &StreamDelivery) -> &'static str {
-    match delivery {
-        StreamDelivery::Direct { .. } => "Direct",
-        StreamDelivery::SplitDash { .. } => "DASH",
-        StreamDelivery::Hls { .. } => "HLS",
     }
 }
 

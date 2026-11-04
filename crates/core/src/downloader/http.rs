@@ -14,7 +14,8 @@ use reqwest::{Client, StatusCode};
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{watch, Semaphore};
+use tokio::task::JoinSet;
 
 use super::types::ProgressReporter;
 
@@ -97,6 +98,9 @@ impl HttpDownloader {
             reporter.add_total(total);
         }
 
+        let mut guard = super::fs::PartCleanupGuard::new();
+        guard.track(part_path);
+
         let result = if probe.range_supported
             && total_bytes
                 .map(|total| total > PARALLEL_THRESHOLD)
@@ -108,8 +112,8 @@ impl HttpDownloader {
             self.download_sequential(url, headers, total_bytes, part_path, reporter, cancel)
                 .await
         };
-        if result.is_err() {
-            super::fs::remove_if_present(part_path).await;
+        if result.is_ok() {
+            guard.disarm();
         }
         result
     }
@@ -291,76 +295,93 @@ impl HttpDownloader {
                 })?,
         );
 
-        let (segment_tx, segment_rx) = mpsc::channel::<(u64, u64)>(self.max_connections);
-        let receiver = Arc::new(Mutex::new(segment_rx));
-        let mut workers = Vec::new();
-        for _ in 0..self.max_connections {
-            let receiver = Arc::clone(&receiver);
-            let file = Arc::clone(&positioned_file);
-            let client = self.client.clone();
-            let request_headers = headers.clone();
-            let worker_url = url.to_owned();
-            let worker_reporter = reporter.clone();
-            let worker_cancel = cancel.clone();
-            workers.push(tokio::spawn(async move {
-                loop {
-                    if *worker_cancel.borrow() {
-                        return Err(HttpDownloadError::Cancelled);
-                    }
-                    let segment = receiver.lock().await.recv().await;
-                    let Some((start, end)) = segment else {
-                        return Ok(());
-                    };
-                    download_segment(
-                        &client,
-                        &worker_url,
-                        &request_headers,
-                        start,
-                        end,
-                        Arc::clone(&file),
-                        &worker_reporter,
-                        worker_cancel.clone(),
-                    )
-                    .await?;
-                }
-            }));
-        }
-
+        let semaphore = Arc::new(Semaphore::new(self.max_connections));
+        let mut join_set = JoinSet::new();
         let mut start = 0_u64;
+        let mut first_error = None;
+
         while start < total {
             if *cancel.borrow() {
-                drop(segment_tx);
-                for worker in workers {
-                    let _ = worker.await;
-                }
+                join_set.abort_all();
                 return Err(HttpDownloadError::Cancelled);
             }
-            let end = start
-                .saturating_add(SEGMENT_SIZE)
-                .saturating_sub(1)
-                .min(total.saturating_sub(1));
-            if segment_tx.send((start, end)).await.is_err() {
-                break;
-            }
-            start = end.saturating_add(1);
-        }
-        drop(segment_tx);
-        let mut first_error = None;
-        for worker in workers {
-            match worker.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) if first_error.is_none() => first_error = Some(error),
-                Ok(Err(_)) => {}
-                Err(error) if first_error.is_none() => {
-                    first_error = Some(HttpDownloadError::WorkerFailed {
-                        message: error.to_string(),
-                    });
+
+            tokio::select! {
+                Some(task_res) = join_set.join_next(), if !join_set.is_empty() => {
+                    match task_res {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            first_error = Some(err);
+                            join_set.abort_all();
+                            break;
+                        }
+                        Err(join_err) => {
+                            first_error = Some(HttpDownloadError::WorkerFailed {
+                                message: join_err.to_string(),
+                            });
+                            join_set.abort_all();
+                            break;
+                        }
+                    }
                 }
-                Err(_) => {}
+                permit_res = semaphore.clone().acquire_owned() => {
+                    let permit = permit_res.map_err(|_| HttpDownloadError::Cancelled)?;
+                    let end = start
+                        .saturating_add(SEGMENT_SIZE)
+                        .saturating_sub(1)
+                        .min(total.saturating_sub(1));
+
+                    let client = self.client.clone();
+                    let file = Arc::clone(&positioned_file);
+                    let worker_url = url.to_owned();
+                    let request_headers = headers.clone();
+                    let worker_reporter = reporter.clone();
+                    let worker_cancel = cancel.clone();
+
+                    join_set.spawn(async move {
+                        let _permit = permit;
+                        download_segment(
+                            &client,
+                            &worker_url,
+                            &request_headers,
+                            start,
+                            end,
+                            file,
+                            &worker_reporter,
+                            worker_cancel,
+                        )
+                        .await
+                    });
+
+                    start = end.saturating_add(1);
+                }
             }
         }
-        if let Some(error) = first_error {
-            return Err(error);
+
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+
+        while let Some(task_res) = join_set.join_next().await {
+            match task_res {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+                Err(join_err) => {
+                    if first_error.is_none() {
+                        first_error = Some(HttpDownloadError::WorkerFailed {
+                            message: join_err.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(err) = first_error {
+            return Err(err);
         }
         Ok(total)
     }

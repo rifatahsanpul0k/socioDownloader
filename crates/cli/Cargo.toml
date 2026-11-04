@@ -1,7 +1,7 @@
 [package]
-name = "rust-dl-cli"
+name = "downloader-cli"
 version = "0.1.0"
-description = "Command-line bootstrapper for rust-dl"
+description = "Command-line media downloader and bootstrapper"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

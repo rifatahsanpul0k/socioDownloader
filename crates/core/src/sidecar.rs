@@ -116,6 +116,18 @@ struct BinarySpec {
     archive: bool,
 }
 
+const SHARED_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15";
+
+/// Creates the shared `reqwest::Client` used across the workspace.
+pub fn create_default_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .user_agent(SHARED_USER_AGENT)
+        .build()
+}
+
 /// Manages the private, per-user directory containing rust-dl's sidecars.
 #[derive(Clone)]
 pub struct SidecarManager {
@@ -124,8 +136,17 @@ pub struct SidecarManager {
 }
 
 impl SidecarManager {
-    /// Creates a manager rooted at `~/Library/Application Support/rust-dl/bin`.
+    /// Creates a manager rooted at `~/Library/Application Support/rust-dl/bin` with the default HTTP client.
     pub fn new() -> Result<Self, SidecarError> {
+        let client = create_default_client().map_err(|source| SidecarError::Request {
+            binary: "sidecar-client",
+            source,
+        })?;
+        Self::new_with_client(client)
+    }
+
+    /// Creates a manager rooted at `~/Library/Application Support/rust-dl/bin` sharing an existing `reqwest::Client`.
+    pub fn new_with_client(client: reqwest::Client) -> Result<Self, SidecarError> {
         if !cfg!(target_os = "macos") {
             return Err(SidecarError::UnsupportedPlatform);
         }
@@ -134,8 +155,13 @@ impl SidecarManager {
             dirs::data_dir().ok_or(SidecarError::ApplicationSupportDirectoryUnavailable)?;
         Ok(Self {
             bin_dir: application_support.join("rust-dl").join("bin"),
-            client: reqwest::Client::new(),
+            client,
         })
+    }
+
+    /// Returns a reference to the shared HTTP client.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// Returns the directory in which the managed binaries are installed.
@@ -169,6 +195,25 @@ impl SidecarManager {
             let destination = self.bin_dir.join(spec.name);
             if self.is_ready(&destination).await? {
                 continue;
+            }
+
+            if spec.name == FFMPEG_BINARY_NAME {
+                if let Some(system_path) = find_system_ffmpeg().await {
+                    if fs::copy(&system_path, &destination).await.is_ok() {
+                        let _ = set_executable(&destination).await;
+                        if self.is_ready(&destination).await.unwrap_or(false) {
+                            send_progress(
+                                &progress,
+                                DownloadProgress::Completed {
+                                    binary: spec.name.to_owned(),
+                                    sha256: "system-binary".to_owned(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                }
             }
 
             if spec.archive {
@@ -662,4 +707,19 @@ fn binary_name(path: &Path) -> &'static str {
         Some(YT_DLP_BINARY_NAME) => YT_DLP_BINARY_NAME,
         _ => "sidecar",
     }
+}
+
+async fn find_system_ffmpeg() -> Option<PathBuf> {
+    let candidates = [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ];
+    for candidate in candidates {
+        let path = Path::new(candidate);
+        if path.is_file() {
+            return Some(path.to_path_buf());
+        }
+    }
+    None
 }
