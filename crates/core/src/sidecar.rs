@@ -18,13 +18,13 @@ pub const FFMPEG_BINARY_NAME: &str = "ffmpeg";
 const YT_DLP_DOWNLOAD_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const FFMPEG_DOWNLOAD_URL: &str =
-    "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip";
-
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const FFMPEG_DOWNLOAD_URL: &str =
-    "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip";
+fn ffmpeg_download_url() -> &'static str {
+    if std::env::consts::ARCH == "x86_64" {
+        "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip"
+    } else {
+        "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip"
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum SidecarError {
@@ -530,7 +530,7 @@ fn binary_specs() -> Result<[BinarySpec; 2], SidecarError> {
             },
             BinarySpec {
                 name: FFMPEG_BINARY_NAME,
-                url: FFMPEG_DOWNLOAD_URL,
+                url: ffmpeg_download_url(),
                 archive: true,
             },
         ])
@@ -713,12 +713,21 @@ async fn find_system_ffmpeg() -> Option<PathBuf> {
     let candidates = [
         "/opt/homebrew/bin/ffmpeg",
         "/usr/local/bin/ffmpeg",
+        "/opt/local/bin/ffmpeg",
         "/usr/bin/ffmpeg",
     ];
     for candidate in candidates {
         let path = Path::new(candidate);
         if path.is_file() {
             return Some(path.to_path_buf());
+        }
+    }
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("ffmpeg");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
     None

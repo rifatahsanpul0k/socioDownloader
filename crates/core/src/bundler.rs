@@ -62,12 +62,56 @@ pub fn bundle_app(
         path: plist_path,
         source,
     })?;
+
+    #[cfg(target_os = "macos")]
+    {
+        // Deep ad-hoc code sign the entire bundle to bind Info.plist and satisfy Gatekeeper
+        let _ = std::process::Command::new("codesign")
+            .arg("--force")
+            .arg("--deep")
+            .arg("--sign")
+            .arg("-")
+            .arg(&app_dir)
+            .output();
+    }
+
     Ok(app_dir)
 }
 
 fn info_plist(version: &str) -> String {
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleName</key>\n\t<string>rust-dl</string>\n\t<key>CFBundleDisplayName</key>\n\t<string>rust-dl</string>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.opensource.rustdl</string>\n\t<key>CFBundleVersion</key>\n\t<string>{version}</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>{version}</string>\n\t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n\t<key>CFBundleExecutable</key>\n\t<string>rust-dl</string>\n\t<key>LSMinimumSystemVersion</key>\n\t<string>12.0</string>\n\t<key>NSHighResolutionCapable</key>\n\t<true/>\n</dict>\n</plist>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\">\n\
+<dict>\n\
+\t<key>CFBundleName</key>\n\
+\t<string>rust-dl</string>\n\
+\t<key>CFBundleDisplayName</key>\n\
+\t<string>rust-dl</string>\n\
+\t<key>CFBundleIdentifier</key>\n\
+\t<string>com.opensource.rustdl</string>\n\
+\t<key>CFBundleVersion</key>\n\
+\t<string>{version}</string>\n\
+\t<key>CFBundleShortVersionString</key>\n\
+\t<string>{version}</string>\n\
+\t<key>CFBundlePackageType</key>\n\
+\t<string>APPL</string>\n\
+\t<key>CFBundleExecutable</key>\n\
+\t<string>rust-dl</string>\n\
+\t<key>LSMinimumSystemVersion</key>\n\
+\t<string>11.0</string>\n\
+\t<key>NSHighResolutionCapable</key>\n\
+\t<true/>\n\
+\t<key>NSSupportsAutomaticGraphicsSwitching</key>\n\
+\t<true/>\n\
+\t<key>NSRequiresAquaSystemAppearance</key>\n\
+\t<false/>\n\
+\t<key>LSApplicationCategoryType</key>\n\
+\t<string>public.app-category.utilities</string>\n\
+\t<key>NSPrincipalClass</key>\n\
+\t<string>NSApplication</string>\n\
+</dict>\n\
+</plist>\n"
     )
 }
 

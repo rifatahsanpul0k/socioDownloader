@@ -252,7 +252,24 @@ fn bundle_app_command(
             unknown => return Err(format!("unknown bundle-app option '{unknown}'").into()),
         }
     }
-    let gui_binary = std::env::current_dir()?.join("target/release/rust-dl-gui");
+    let cwd = std::env::current_dir()?;
+    let arm_binary = cwd.join("target/aarch64-apple-darwin/release/rust-dl-gui");
+    let intel_binary = cwd.join("target/x86_64-apple-darwin/release/rust-dl-gui");
+    let target_binary = cwd.join("target/release/rust-dl-gui");
+
+    let gui_binary = if arm_binary.is_file() && intel_binary.is_file() {
+        let _ = std::process::Command::new("lipo")
+            .arg("-create")
+            .arg("-output")
+            .arg(&target_binary)
+            .arg(&arm_binary)
+            .arg(&intel_binary)
+            .status();
+        target_binary
+    } else {
+        target_binary
+    };
+
     let app =
         rust_dl_core::bundler::bundle_app(&gui_binary, &output_dir, env!("CARGO_PKG_VERSION"))?;
     println!("Created {}", app.display());
