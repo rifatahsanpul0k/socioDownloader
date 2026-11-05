@@ -141,6 +141,25 @@ impl QueueManager {
         let cookies = self.inner.cookie_source.read().await.clone();
         let mut ids = Vec::new();
         for url in urls {
+            let already_active_id = {
+                let jobs = self.inner.jobs.read().await;
+                jobs.values()
+                    .find(|j| {
+                        j.url == url
+                            && matches!(
+                                j.status,
+                                JobStatus::Queued
+                                    | JobStatus::Downloading { .. }
+                                    | JobStatus::Ready { .. }
+                            )
+                    })
+                    .map(|j| j.id)
+            };
+            if let Some(id) = already_active_id {
+                ids.push(id);
+                continue;
+            }
+
             let manifests = self
                 .inner
                 .resolver
@@ -175,6 +194,25 @@ impl QueueManager {
         let cookies = self.inner.cookie_source.read().await.clone();
         let mut ids = Vec::new();
         for url in urls {
+            let already_active_id = {
+                let jobs = self.inner.jobs.read().await;
+                jobs.values()
+                    .find(|j| {
+                        j.url == url
+                            && matches!(
+                                j.status,
+                                JobStatus::Queued
+                                    | JobStatus::Downloading { .. }
+                                    | JobStatus::Ready { .. }
+                            )
+                    })
+                    .map(|j| j.id)
+            };
+            if let Some(id) = already_active_id {
+                ids.push(id);
+                continue;
+            }
+
             let manifests = self
                 .inner
                 .resolver

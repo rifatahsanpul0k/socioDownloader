@@ -82,6 +82,7 @@ struct RustDlApp {
     event_receiver: std_mpsc::Receiver<QueueEvent>,
     clipboard_receiver: std_mpsc::Receiver<String>,
     clipboard_enabled: watch::Sender<bool>,
+    last_submission: Option<(String, std::time::Instant)>,
     status: Arc<Mutex<String>>,
 }
 
@@ -224,6 +225,7 @@ impl RustDlApp {
             event_receiver,
             clipboard_receiver,
             clipboard_enabled,
+            last_submission: None,
             status,
         }
     }
@@ -329,6 +331,30 @@ impl RustDlApp {
         if clean.is_empty() {
             return;
         }
+
+        // 1. Debounce rapid duplicate triggers (e.g. fast double-clicks or duplicate events within 1.5s)
+        if let Some((ref last_url, last_time)) = self.last_submission {
+            if last_url == &clean && last_time.elapsed() < Duration::from_millis(1500) {
+                return;
+            }
+        }
+        self.last_submission = Some((clean.clone(), std::time::Instant::now()));
+
+        // 2. Prevent queuing duplicate active downloads if the exact same URL is already downloading
+        let already_active = self.jobs.values().any(|j| {
+            j.url == clean
+                && matches!(
+                    j.status,
+                    JobStatus::Queued
+                        | JobStatus::Downloading { .. }
+                        | JobStatus::Ready { .. }
+                )
+        });
+        if already_active {
+            set_status(&self.status, "Download already in progress for this link");
+            return;
+        }
+
         let queue = self.queue.clone();
         let format_mode = self.format_mode;
         let allow_playlists = self.allow_playlists;
@@ -549,22 +575,6 @@ impl RustDlApp {
                 }
             }
         }
-        let pasted = context.input(|input| {
-            input
-                .raw
-                .events
-                .iter()
-                .filter_map(|event| match event {
-                    egui::Event::Paste(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        });
-        for text in pasted {
-            if !text.trim().is_empty() {
-                self.start_download(text);
-            }
-        }
     }
 }
 
@@ -580,7 +590,6 @@ impl eframe::App for RustDlApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.handle_dropped_input(context);
-        let mut input_focused = false;
 
         egui::TopBottomPanel::top("top_header")
             .exact_height(theme::HEADER_HEIGHT)
@@ -630,8 +639,10 @@ impl eframe::App for RustDlApp {
             ui.add_space(2.0);
         });
 
+        // Global ⌘V shortcut: only triggers paste & download when no text widget is focused
+        let any_widget_focused = context.memory(|mem| mem.focused().is_some());
         let paste_shortcut = context.input(|input| {
-            input.modifiers.mac_cmd && input.key_pressed(egui::Key::V) && !input_focused
+            input.modifiers.mac_cmd && input.key_pressed(egui::Key::V) && !any_widget_focused
         });
         if paste_shortcut {
             self.paste_and_download();
@@ -667,36 +678,43 @@ impl eframe::App for RustDlApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let available_w = ui.available_width() - 175.0;
-                            let input = ui.add(
+                            let input_response = ui.add(
                                 egui::TextEdit::singleline(&mut self.input)
                                     .hint_text("Paste any YouTube, Instagram, Pinterest, Facebook, or GitHub link...")
                                     .desired_width(available_w.max(260.0)),
                             );
-                            input_focused = input.has_focus();
-                            if (input.lost_focus() || input_focused)
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                            {
-                                let text = self.input.trim().to_owned();
-                                if !text.is_empty() {
-                                    self.input.clear();
-                                    self.start_download(text);
+
+                            let enter_pressed = input_response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if enter_pressed {
+                                let text = std::mem::take(&mut self.input);
+                                let trimmed = text.trim().to_owned();
+                                if !trimmed.is_empty() {
+                                    self.start_download(trimmed);
                                 } else {
                                     self.paste_and_download();
                                 }
                             }
 
+                            let has_text = !self.input.trim().is_empty();
+                            let btn_label = if has_text {
+                                "⬇ Download"
+                            } else {
+                                "📋 Paste & Download"
+                            };
+
                             let btn = egui::Button::new(
-                                RichText::new("📋 Paste & Download").strong().color(egui::Color32::WHITE),
+                                RichText::new(btn_label).strong().color(egui::Color32::WHITE),
                             )
                             .fill(theme::COLOR_ACCENT_BLUE)
                             .rounding(egui::Rounding::same(8.0))
                             .min_size(egui::vec2(165.0, 32.0));
                             if ui.add(btn).clicked() {
-                                if self.input.trim().is_empty() {
-                                    self.paste_and_download();
-                                } else {
+                                if has_text {
                                     let text = std::mem::take(&mut self.input);
                                     self.start_download(text);
+                                } else {
+                                    self.paste_and_download();
                                 }
                             }
                         });
