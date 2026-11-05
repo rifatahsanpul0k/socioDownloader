@@ -18,16 +18,17 @@ use crate::theme;
 // Authoritative Color & Text Tokens (matching Apple HIG and E2E Test Suite)
 // ============================================================================
 
-pub const COLOR_PROBING_BLUE: Color32 = Color32::from_rgb(0, 122, 255); // #007AFF
+pub const COLOR_PROBING_INDIGO: Color32 = Color32::from_rgb(88, 86, 214); // #5856D6
+pub const COLOR_PROBING_BLUE: Color32 = COLOR_PROBING_INDIGO; // #5856D6 (aliased for compatibility)
 pub const COLOR_DOWNLOADING_BLUE: Color32 = Color32::from_rgb(0, 122, 255); // #007AFF
 pub const COLOR_MUXING_PURPLE: Color32 = Color32::from_rgb(175, 82, 222); // #AF52DE
 pub const COLOR_COMPLETED_GREEN: Color32 = Color32::from_rgb(52, 199, 89); // #34C759
 pub const COLOR_AUTH_AMBER: Color32 = Color32::from_rgb(255, 149, 0); // #FF9500
 
-pub const TEXT_PROBING_STATUS: &str = "Extracting Metadata...";
-pub const TEXT_MUXING_STATUS: &str = "Merging Audio & Video...";
-pub const TEXT_COMPLETED_STATUS: &str = "Completed.";
-pub const TEXT_AUTH_REQUIRED_STATUS: &str = "Login required for this platform";
+pub const TEXT_PROBING_STATUS: &str = "Finding your file...";
+pub const TEXT_MUXING_STATUS: &str = "Adding high-quality sound...";
+pub const TEXT_COMPLETED_STATUS: &str = "✓ Saved to Downloads";
+pub const TEXT_AUTH_REQUIRED_STATUS: &str = "🔒 This video is private or age-restricted.";
 pub const TEXT_NETWORK_ERROR_STATUS: &str =
     "Network connection error. Please check your internet connection.";
 pub const TEXT_UNSUPPORTED_URL_STATUS: &str =
@@ -38,7 +39,8 @@ pub const TEXT_GENERIC_ERROR_STATUS: &str =
     "Unable to complete download. Please check the link and try again.";
 
 pub const BUTTON_CONNECT_COOKIES: &str = "Connect Browser Cookies";
-pub const BUTTON_RETRY: &str = "Retry";
+pub const BUTTON_RETRY: &str = "Try Again";
+pub const BUTTON_OPEN: &str = "Open";
 pub const BUTTON_SHOW_IN_FINDER: &str = "Show in Finder";
 pub const BUTTON_CANCEL: &str = "Cancel";
 pub const BUTTON_REMOVE: &str = "Remove";
@@ -54,15 +56,25 @@ pub fn queue_card_frame(visuals: &egui::Visuals, is_amber: bool) -> egui::Frame 
     let shadow_color = if is_amber {
         Color32::from_rgba_unmultiplied(255, 149, 0, 40)
     } else {
-        Color32::from_black_alpha(35)
+        Color32::from_black_alpha(25)
     };
 
     let mut frame = theme::card_frame(visuals)
-        .rounding(egui::Rounding::same(theme::CARD_ROUNDING))
-        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .rounding(egui::Rounding::same(12.0))
+        .inner_margin(egui::Margin::same(16.0))
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            if is_amber {
+                COLOR_AUTH_AMBER
+            } else if visuals.dark_mode {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 20)
+            } else {
+                Color32::from_rgba_unmultiplied(0, 0, 0, 15)
+            },
+        ))
         .shadow(egui::epaint::Shadow {
             offset: Vec2::new(0.0, 2.0),
-            blur: 6.0,
+            blur: 8.0,
             spread: 0.0,
             color: shadow_color,
         });
@@ -111,9 +123,15 @@ pub fn platform_badge_style(platform: Platform) -> (&'static str, &'static str, 
             Color32::from_rgba_unmultiplied(230, 0, 35, 30),
             Color32::from_rgb(230, 0, 35),
         ),
+        Platform::GitHub => (
+            "🐙",
+            "GitHub",
+            Color32::from_rgba_unmultiplied(130, 80, 223, 30),
+            Color32::from_rgb(140, 95, 230),
+        ),
         Platform::Generic => (
-            "🌐",
-            "Direct",
+            "📦",
+            "File",
             Color32::from_rgba_unmultiplied(142, 142, 147, 30),
             Color32::from_rgb(142, 142, 147),
         ),
@@ -205,32 +223,36 @@ pub fn format_eta(secs: u64) -> String {
         let mins = secs / 60;
         let remaining = secs % 60;
         format!("{}m {}s left", mins, remaining)
+    } else if secs == 1 {
+        "1 second left".to_string()
     } else {
-        format!("{}s left", secs)
+        format!("{} seconds left", secs)
     }
 }
 
-/// Formats the Phase 2 metric line:
-/// "Downloading... <downloaded> / <total> • <speed> • <ETA> left"
+/// Formats the Phase 2 metric line with non-jittering monospace numbers:
+/// "Downloading — 64% • 5 seconds left"
 pub fn format_download_metrics(
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
     speed_bytes_per_sec: f64,
     eta_secs: Option<u64>,
 ) -> String {
-    let human_downloaded = format_bytes(downloaded_bytes);
-    let human_total = total_bytes
-        .map(format_bytes)
-        .unwrap_or_else(|| "-- MB".to_string());
-    let human_speed = format_speed(speed_bytes_per_sec);
-    let human_eta = eta_secs
-        .map(format_eta)
-        .unwrap_or_else(|| "-- left".to_string());
-
-    format!(
-        "Downloading... {} / {} • {} • {}",
-        human_downloaded, human_total, human_speed, human_eta
-    )
+    if let Some(total) = total_bytes.filter(|&t| t > 0) {
+        let pct = (downloaded_bytes as f64 / total as f64 * 100.0).clamp(0.0, 100.0);
+        let human_eta = eta_secs
+            .map(format_eta)
+            .unwrap_or_else(|| "-- left".to_string());
+        format!("Downloading — {:.0}% • {}", pct, human_eta)
+    } else if speed_bytes_per_sec > 0.0 {
+        format!(
+            "Downloading — {} • {}",
+            format_bytes(downloaded_bytes),
+            format_speed(speed_bytes_per_sec)
+        )
+    } else {
+        format!("Downloading — {}", format_bytes(downloaded_bytes))
+    }
 }
 
 // ============================================================================
@@ -319,6 +341,53 @@ pub fn reveal_in_finder(path: &Path) {
     }
 }
 
+/// Opens a file with macOS default application using `open <path>`.
+pub fn open_file(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg(path)
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+    }
+}
+
+/// Derives friendly subtitle text for everyday users without technical jargon.
+pub fn friendly_media_subtitle(job: &QueueJob) -> String {
+    let label = match job.platform {
+        Platform::GitHub => "📦 GitHub File",
+        Platform::Generic => "📦 File",
+        _ => {
+            if let Some(ref fid) = job.selected_format_id {
+                let lower = fid.to_lowercase();
+                if lower.contains("audio") || lower == "m4a" || lower == "mp3" {
+                    "🎵 Audio Track"
+                } else if lower.contains("4k") || lower.contains("2160") {
+                    "✨ 4K Video with Sound"
+                } else {
+                    "🎬 HD Video with Sound"
+                }
+            } else {
+                "🎬 HD Video with Sound"
+            }
+        }
+    };
+
+    let size = match &job.status {
+        JobStatus::Downloading { progress } => progress.total_bytes.map(format_bytes),
+        _ => None,
+    };
+
+    if let Some(s) = size {
+        format!("{label} • {s}")
+    } else {
+        label.to_string()
+    }
+}
+
 // ============================================================================
 // 4-Phase Dynamic Progress Indicators (R3)
 // ============================================================================
@@ -381,7 +450,7 @@ pub fn render_progress_indicator(
 
     let bar = egui::ProgressBar::new(fraction)
         .fill(color)
-        .text(text);
+        .text(RichText::new(text).monospace());
 
     ui.add(bar)
 }
@@ -421,6 +490,7 @@ pub enum QueueCardAction {
     Cancel(JobId),
     Retry(JobId),
     Remove(JobId),
+    Open(PathBuf),
     ShowInFinder(PathBuf),
     OpenCookies,
 }
@@ -436,7 +506,7 @@ pub fn render_queue_card(
     render_queue_card_full(ui, job, on_retry, on_cancel, |_| {}, on_open_cookies);
 }
 
-/// Renders a queue card with full callback support including item removal.
+/// Renders a queue card with full callback support including item removal and direct open.
 pub fn render_queue_card_full(
     ui: &mut egui::Ui,
     job: &QueueJob,
@@ -459,29 +529,19 @@ pub fn render_queue_card_full(
     queue_card_frame(ui.visuals(), is_amber).show(ui, |ui| {
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
 
-        // Row 1: Platform Badge, Media Title, and Job ID
+        // Row 1: Platform Badge and Clean Media Title (no technical IDs)
         ui.horizontal(|ui| {
             render_platform_badge(ui, job.platform);
             let title = job.title.as_deref().unwrap_or(&job.url);
-            ui.label(RichText::new(title).strong().size(13.5));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!("#{}", job.id))
-                        .monospace()
-                        .color(theme::TEXT_SECONDARY_DARK)
-                        .size(11.0),
-                );
-            });
+            ui.label(RichText::new(title).strong().size(14.0));
         });
 
-        // Row 2: Format information
-        if let Some(format_id) = &job.selected_format_id {
-            ui.label(
-                RichText::new(format!("Format: {format_id}"))
-                    .color(theme::TEXT_SECONDARY_DARK)
-                    .size(11.5),
-            );
-        }
+        // Row 2: Friendly Subtitle & File Size (Heuristic #2: Zero technical jargon)
+        ui.label(
+            RichText::new(friendly_media_subtitle(job))
+                .color(theme::TEXT_SECONDARY_DARK)
+                .size(12.0),
+        );
 
         // Row 3: Status / Progress Bar
         match &job.status {
@@ -492,7 +552,7 @@ pub fn render_queue_card_full(
                 render_progress_indicator(ui, VisualProgressPhase::Probing, 0, None, 0.0, None);
             }
             JobStatus::Ready { .. } => {
-                ui.label(RichText::new("Ready to download").color(COLOR_PROBING_BLUE));
+                ui.label(RichText::new("Ready to download").color(COLOR_PROBING_INDIGO));
             }
             JobStatus::Downloading { progress } => match &progress.phase {
                 DownloadPhase::Failed { error } => {
@@ -508,7 +568,7 @@ pub fn render_queue_card_full(
                         });
                         ui.label(
                             RichText::new(
-                                "Login or cookies needed to access this content. Connect browser cookies in settings.",
+                                "Sign in via your browser to download private or restricted content.",
                             )
                             .color(theme::TEXT_SECONDARY_DARK)
                             .size(11.5),
@@ -532,7 +592,7 @@ pub fn render_queue_card_full(
                 ui.add(
                     egui::ProgressBar::new(1.0)
                         .fill(COLOR_COMPLETED_GREEN)
-                        .text(TEXT_COMPLETED_STATUS),
+                        .text(RichText::new(TEXT_COMPLETED_STATUS).monospace()),
                 );
                 if let Some(file_name) = output_path.file_name() {
                     ui.label(
@@ -555,7 +615,7 @@ pub fn render_queue_card_full(
                     });
                     ui.label(
                         RichText::new(
-                            "Login or cookies needed to access this content. Connect browser cookies in settings.",
+                            "Sign in via your browser to download private or restricted content.",
                         )
                         .color(theme::TEXT_SECONDARY_DARK)
                         .size(11.5),
@@ -584,6 +644,12 @@ pub fn render_queue_card_full(
                             }
                             if ui.button(BUTTON_SHOW_IN_FINDER).clicked() {
                                 action = QueueCardAction::ShowInFinder(output_path.clone());
+                            }
+                            let open_btn = egui::Button::new(
+                                RichText::new(BUTTON_OPEN).strong().color(COLOR_DOWNLOADING_BLUE),
+                            );
+                            if ui.add(open_btn).clicked() {
+                                action = QueueCardAction::Open(output_path.clone());
                             }
                         }
                         DownloadPhase::Failed { error } => {
@@ -616,6 +682,12 @@ pub fn render_queue_card_full(
                         }
                         if ui.button(BUTTON_SHOW_IN_FINDER).clicked() {
                             action = QueueCardAction::ShowInFinder(output_path.clone());
+                        }
+                        let open_btn = egui::Button::new(
+                            RichText::new(BUTTON_OPEN).strong().color(COLOR_DOWNLOADING_BLUE),
+                        );
+                        if ui.add(open_btn).clicked() {
+                            action = QueueCardAction::Open(output_path.clone());
                         }
                     }
                     JobStatus::Failed { error } => {
@@ -666,6 +738,7 @@ pub fn render_queue_card_full(
         QueueCardAction::Cancel(id) => on_cancel(id),
         QueueCardAction::Retry(id) => on_retry(id),
         QueueCardAction::Remove(id) => on_remove(id),
+        QueueCardAction::Open(path) => open_file(&path),
         QueueCardAction::ShowInFinder(path) => reveal_in_finder(&path),
         QueueCardAction::OpenCookies => on_open_cookies(),
     }
@@ -681,7 +754,7 @@ mod tests {
 
     #[test]
     fn test_phase_color_tokens() {
-        assert_eq!(COLOR_PROBING_BLUE, Color32::from_rgb(0, 122, 255));
+        assert_eq!(COLOR_PROBING_INDIGO, Color32::from_rgb(88, 86, 214));
         assert_eq!(COLOR_DOWNLOADING_BLUE, Color32::from_rgb(0, 122, 255));
         assert_eq!(COLOR_MUXING_PURPLE, Color32::from_rgb(175, 82, 222));
         assert_eq!(COLOR_COMPLETED_GREEN, Color32::from_rgb(52, 199, 89));
@@ -690,12 +763,16 @@ mod tests {
 
     #[test]
     fn test_status_and_button_text_constants() {
-        assert_eq!(TEXT_PROBING_STATUS, "Extracting Metadata...");
-        assert_eq!(TEXT_MUXING_STATUS, "Merging Audio & Video...");
-        assert_eq!(TEXT_COMPLETED_STATUS, "Completed.");
-        assert_eq!(TEXT_AUTH_REQUIRED_STATUS, "Login required for this platform");
+        assert_eq!(TEXT_PROBING_STATUS, "Finding your file...");
+        assert_eq!(TEXT_MUXING_STATUS, "Adding high-quality sound...");
+        assert_eq!(TEXT_COMPLETED_STATUS, "✓ Saved to Downloads");
+        assert_eq!(
+            TEXT_AUTH_REQUIRED_STATUS,
+            "🔒 This video is private or age-restricted."
+        );
         assert_eq!(BUTTON_CONNECT_COOKIES, "Connect Browser Cookies");
-        assert_eq!(BUTTON_RETRY, "Retry");
+        assert_eq!(BUTTON_RETRY, "Try Again");
+        assert_eq!(BUTTON_OPEN, "Open");
         assert_eq!(BUTTON_SHOW_IN_FINDER, "Show in Finder");
     }
 
@@ -752,8 +829,9 @@ mod tests {
 
     #[test]
     fn test_format_eta_scales() {
-        assert_eq!(format_eta(15), "15s left");
-        assert_eq!(format_eta(59), "59s left");
+        assert_eq!(format_eta(1), "1 second left");
+        assert_eq!(format_eta(15), "15 seconds left");
+        assert_eq!(format_eta(59), "59 seconds left");
         assert_eq!(format_eta(60), "1m 0s left");
         assert_eq!(format_eta(125), "2m 5s left");
         assert_eq!(format_eta(3600), "1h 0m left");
@@ -764,16 +842,13 @@ mod tests {
     #[test]
     fn test_format_download_metrics_complete_line() {
         let m = format_download_metrics(50_000_000, Some(100_000_000), 5_242_880.0, Some(10));
-        assert_eq!(m, "Downloading... 47.7 MB / 95.4 MB • 5.0 MB/s • 10s left");
+        assert_eq!(m, "Downloading — 50% • 10 seconds left");
 
         let zero = format_download_metrics(0, Some(0), 0.0, None);
-        assert_eq!(zero, "Downloading... 0 B / 0 B • -- B/s • -- left");
+        assert_eq!(zero, "Downloading — 0 B");
 
         let unknown_total = format_download_metrics(12_345_678, None, 1_000_000.0, None);
-        assert_eq!(
-            unknown_total,
-            "Downloading... 11.8 MB / -- MB • 976.6 KB/s • -- left"
-        );
+        assert_eq!(unknown_total, "Downloading — 11.8 MB • 976.6 KB/s");
     }
 
     #[test]
@@ -835,6 +910,7 @@ mod tests {
             Platform::Instagram,
             Platform::Facebook,
             Platform::Pinterest,
+            Platform::GitHub,
             Platform::Generic,
         ] {
             let (icon, label, fill, text_color) = platform_badge_style(platform);
@@ -849,13 +925,13 @@ mod tests {
     fn test_queue_card_frame_styling() {
         let visuals = egui::Visuals::dark();
         let normal_frame = queue_card_frame(&visuals, false);
-        assert_eq!(normal_frame.rounding.nw, 10.0);
+        assert_eq!(normal_frame.rounding.nw, 12.0);
         assert_eq!(normal_frame.shadow.offset, Vec2::new(0.0, 2.0));
-        assert_eq!(normal_frame.shadow.blur, 6.0);
-        assert_eq!(normal_frame.shadow.color.a(), 35);
+        assert_eq!(normal_frame.shadow.blur, 8.0);
+        assert_eq!(normal_frame.shadow.color.a(), 25);
 
         let amber_frame = queue_card_frame(&visuals, true);
-        assert_eq!(amber_frame.rounding.nw, 10.0);
+        assert_eq!(amber_frame.rounding.nw, 12.0);
         assert_eq!(amber_frame.stroke.width, 1.5);
         assert_eq!(amber_frame.stroke.color, COLOR_AUTH_AMBER);
     }

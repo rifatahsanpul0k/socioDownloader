@@ -96,7 +96,9 @@ async fn resolve_with_options(
             "--no-warnings",
             "--socket-timeout",
             "15",
+            "--ffmpeg-location",
         ])
+        .arg(sidecar.bin_dir())
         .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -121,7 +123,9 @@ async fn resolve_with_options(
                     "--no-warnings",
                     "--socket-timeout",
                     "15",
+                    "--ffmpeg-location",
                 ])
+                .arg(sidecar.bin_dir())
                 .kill_on_drop(true)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -393,8 +397,16 @@ fn combined_size(video: Option<u64>, audio: Option<u64>) -> Option<u64> {
 }
 
 fn audio_quality(format: &ParsedFormat) -> (u8, i64, i64) {
+    let is_apple_compatible = u8::from(
+        format.container == "m4a"
+            || format
+                .acodec
+                .as_deref()
+                .map(|c| c.contains("aac") || c.contains("mp4a"))
+                .unwrap_or(false),
+    );
     (
-        u8::from(format.container == "m4a"),
+        is_apple_compatible,
         format.abr.unwrap_or_default() as i64,
         format.filesize_bytes.unwrap_or_default() as i64,
     )

@@ -2126,6 +2126,7 @@ name = "rust-dl-core"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "percent-encoding",
  "reqwest",
  "scraper",
  "serde",

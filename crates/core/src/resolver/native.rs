@@ -21,6 +21,9 @@ pub async fn try_resolve(
     ) {
         return Ok(None);
     }
+    if sanitized.platform == Platform::GitHub {
+        return resolve_github(client, sanitized).await;
+    }
     if sanitized.platform == Platform::Pinterest && is_pinterest_pin(&sanitized.url) {
         return Ok(try_open_graph(client, sanitized).await);
     }
@@ -41,6 +44,101 @@ pub async fn try_resolve(
         &content_type,
         response.headers(),
     )))
+}
+
+async fn resolve_github(
+    client: &Client,
+    sanitized: &SanitizedUrl,
+) -> Result<Option<MediaManifest>, ResolverError> {
+    let mut target_url = sanitized.url.clone();
+    let mut response = probe_media(client, &target_url).await;
+
+    // Bare repo fallback: if refs/heads/main returned 404, fall back to refs/heads/master
+    if response.is_err() {
+        let s = target_url.as_str();
+        if s.contains("/zip/refs/heads/main") {
+            let master_url_str = s.replace("/zip/refs/heads/main", "/zip/refs/heads/master");
+            if let Ok(master_url) = Url::parse(&master_url_str) {
+                target_url = master_url;
+                response = probe_media(client, &target_url).await;
+            }
+        }
+    }
+
+    let response = match response {
+        Ok(r) => r,
+        Err(e) => return Err(e),
+    };
+
+    let content_type = response_content_type(&response)
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    let headers = response.headers();
+
+    let cd_filename = headers
+        .get("content-disposition")
+        .and_then(|val| val.to_str().ok())
+        .and_then(filename_from_content_disposition);
+
+    let filename = cd_filename.unwrap_or_else(|| {
+        let name = media_id(&target_url);
+        if target_url.as_str().contains("/zip/refs/heads/") {
+            let segments: Vec<&str> = target_url
+                .path_segments()
+                .map(|s| s.collect())
+                .unwrap_or_default();
+            if segments.len() >= 2 {
+                format!("{}-main.zip", segments[1])
+            } else {
+                format!("{name}.zip")
+            }
+        } else {
+            name
+        }
+    });
+
+    let mut captured_headers = HashMap::new();
+    for (name, value) in headers {
+        if let Ok(value) = value.to_str() {
+            captured_headers.insert(name.as_str().to_owned(), value.to_owned());
+        }
+    }
+
+    let filesize_bytes = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+
+    let container = if filename.contains('.') {
+        filename
+            .split('.')
+            .next_back()
+            .unwrap_or("zip")
+            .to_ascii_lowercase()
+    } else {
+        media_container(target_url.as_str(), &content_type)
+    };
+
+    Ok(Some(MediaManifest {
+        id: filename.clone(),
+        title: filename,
+        uploader: "GitHub".to_owned(),
+        duration_secs: None,
+        thumbnail_url: None,
+        platform: Platform::GitHub,
+        streams: vec![MediaStream {
+            format_id: "github-download".to_owned(),
+            delivery: StreamDelivery::Direct {
+                url: target_url.to_string(),
+            },
+            container,
+            resolution: None,
+            fps: None,
+            filesize_bytes,
+            vcodec: None,
+            acodec: None,
+            headers: captured_headers,
+        }],
+    }))
 }
 
 async fn probe_media(client: &Client, url: &Url) -> Result<Response, ResolverError> {
@@ -144,7 +242,11 @@ fn direct_manifest(
     content_type: &str,
     headers: &HeaderMap,
 ) -> MediaManifest {
-    let id = media_id(url);
+    let cd_filename = headers
+        .get("content-disposition")
+        .and_then(|val| val.to_str().ok())
+        .and_then(filename_from_content_disposition);
+    let id = cd_filename.unwrap_or_else(|| media_id(url));
     let mut captured_headers = HashMap::new();
     for (name, value) in headers {
         if let Ok(value) = value.to_str() {
@@ -188,6 +290,29 @@ fn direct_manifest(
     }
 }
 
+fn filename_from_content_disposition(header_val: &str) -> Option<String> {
+    for part in header_val.split(';') {
+        let part = part.trim();
+        if let Some(stripped) = part.strip_prefix("filename*=") {
+            let value = stripped.trim_matches('"');
+            if let Some(encoded) = value
+                .strip_prefix("UTF-8''")
+                .or_else(|| value.strip_prefix("utf-8''"))
+            {
+                if let Ok(decoded) = percent_encoding::percent_decode_str(encoded).decode_utf8() {
+                    return Some(decoded.into_owned());
+                }
+            }
+        } else if let Some(stripped) = part.strip_prefix("filename=") {
+            let filename = stripped.trim_matches('"').trim_matches('\'').trim();
+            if !filename.is_empty() {
+                return Some(filename.to_owned());
+            }
+        }
+    }
+    None
+}
+
 fn response_content_type(response: &Response) -> Option<String> {
     response
         .headers()
@@ -207,6 +332,14 @@ fn is_direct_media_type(content_type: &str) -> bool {
     content_type.starts_with("image/")
         || content_type.starts_with("video/")
         || content_type.starts_with("audio/")
+        || content_type == "application/zip"
+        || content_type == "application/x-zip-compressed"
+        || content_type == "application/octet-stream"
+        || content_type == "application/x-gzip"
+        || content_type == "application/gzip"
+        || content_type == "application/x-tar"
+        || content_type == "application/pdf"
+        || content_type.starts_with("text/")
 }
 
 fn media_container(url: &str, content_type: &str) -> String {

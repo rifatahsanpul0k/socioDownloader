@@ -42,7 +42,7 @@ pub enum CoreError {
 }
 
 pub use auth::{AuthError, BrowserKind, CookieSource};
-pub use resolver::{MediaManifest, MediaStream, Platform, Resolver, StreamDelivery};
+pub use resolver::{find_url_in_text, MediaManifest, MediaStream, Platform, Resolver, StreamDelivery};
 pub use sidecar::{
     create_default_client, BinaryVersions, DownloadProgress, SidecarError, SidecarManager,
     SidecarUpdateReport, FFMPEG_BINARY_NAME, YT_DLP_BINARY_NAME,

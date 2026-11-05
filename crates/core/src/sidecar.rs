@@ -145,18 +145,28 @@ impl SidecarManager {
         Self::new_with_client(client)
     }
 
-    /// Creates a manager rooted at `~/Library/Application Support/rust-dl/bin` sharing an existing `reqwest::Client`.
+    /// Creates a manager rooted at `~/Library/Application Support/rust-dl/bin` (with fallback to `~/.rust-dl/bin`) sharing an existing `reqwest::Client`.
     pub fn new_with_client(client: reqwest::Client) -> Result<Self, SidecarError> {
         if !cfg!(target_os = "macos") {
             return Err(SidecarError::UnsupportedPlatform);
         }
 
-        let application_support =
-            dirs::data_dir().ok_or(SidecarError::ApplicationSupportDirectoryUnavailable)?;
-        Ok(Self {
-            bin_dir: application_support.join("rust-dl").join("bin"),
-            client,
-        })
+        let bin_dir = if let Some(application_support) = dirs::data_dir() {
+            let primary = application_support.join("rust-dl").join("bin");
+            if std::fs::create_dir_all(&primary).is_ok() {
+                primary
+            } else if let Some(home) = dirs::home_dir() {
+                home.join(".rust-dl").join("bin")
+            } else {
+                primary
+            }
+        } else if let Some(home) = dirs::home_dir() {
+            home.join(".rust-dl").join("bin")
+        } else {
+            return Err(SidecarError::ApplicationSupportDirectoryUnavailable);
+        };
+
+        Ok(Self { bin_dir, client })
     }
 
     /// Returns a reference to the shared HTTP client.
@@ -201,6 +211,7 @@ impl SidecarManager {
                 if let Some(system_path) = find_system_ffmpeg().await {
                     if fs::copy(&system_path, &destination).await.is_ok() {
                         let _ = set_executable(&destination).await;
+                        clear_quarantine(&destination).await;
                         if self.is_ready(&destination).await.unwrap_or(false) {
                             send_progress(
                                 &progress,
@@ -230,6 +241,9 @@ impl SidecarManager {
     pub async fn verify_binaries(&self) -> Result<BinaryVersions, SidecarError> {
         let yt_dlp_path = self.bin_dir.join(YT_DLP_BINARY_NAME);
         let ffmpeg_path = self.bin_dir.join(FFMPEG_BINARY_NAME);
+
+        clear_quarantine(&yt_dlp_path).await;
+        clear_quarantine(&ffmpeg_path).await;
 
         let (yt_dlp, ffmpeg) = tokio::try_join!(
             run_version(&yt_dlp_path, YT_DLP_BINARY_NAME, "--version"),
@@ -301,6 +315,7 @@ impl SidecarManager {
             return Err(SidecarError::UnsupportedPlatform);
         }
 
+        clear_quarantine(path).await;
         Ok(true)
     }
 
@@ -332,6 +347,7 @@ impl SidecarManager {
                 source,
             });
         }
+        clear_quarantine(destination).await;
         send_progress(
             progress,
             DownloadProgress::Completed {
@@ -411,6 +427,7 @@ impl SidecarManager {
                     path: destination.to_path_buf(),
                     source,
                 })?;
+            clear_quarantine(destination).await;
             send_progress(
                 progress,
                 DownloadProgress::Completed {
@@ -731,4 +748,22 @@ async fn find_system_ffmpeg() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Removes the macOS Gatekeeper quarantine attribute (`com.apple.quarantine`) from a sidecar file.
+/// Ignores failures (e.g. if the attribute is not set or non-macOS).
+pub async fn clear_quarantine(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("/usr/bin/xattr")
+            .arg("-d")
+            .arg("com.apple.quarantine")
+            .arg(path)
+            .output()
+            .await;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+    }
 }

@@ -14,6 +14,8 @@ pub const COLOR_DARK_BG: egui::Color32 = egui::Color32::from_rgb(0x1e, 0x1e, 0x1
 /// macOS Light Mode flat background color (#f6f6f6).
 pub const COLOR_LIGHT_BG: egui::Color32 = egui::Color32::from_rgb(0xf6, 0xf6, 0xf6);
 
+/// Apple HIG System Indigo (#5856D6) - Probing / Finding phase.
+pub const COLOR_ACCENT_INDIGO: egui::Color32 = egui::Color32::from_rgb(0x58, 0x56, 0xd6);
 /// Apple HIG System Blue (#007AFF) - Probing & Downloading phases.
 pub const COLOR_ACCENT_BLUE: egui::Color32 = egui::Color32::from_rgb(0x00, 0x7a, 0xff);
 /// Apple HIG System Purple (#AF52DE) - Muxing / Merging phase.
@@ -28,6 +30,7 @@ pub const COLOR_ACCENT_RED: egui::Color32 = egui::Color32::from_rgb(0xff, 0x3b, 
 // Aliases matching HIG nomenclature
 pub const MACOS_DARK_BG: egui::Color32 = COLOR_DARK_BG;
 pub const MACOS_LIGHT_BG: egui::Color32 = COLOR_LIGHT_BG;
+pub const SYSTEM_INDIGO: egui::Color32 = COLOR_ACCENT_INDIGO;
 pub const SYSTEM_BLUE: egui::Color32 = COLOR_ACCENT_BLUE;
 pub const SYSTEM_PURPLE: egui::Color32 = COLOR_ACCENT_PURPLE;
 pub const SYSTEM_GREEN: egui::Color32 = COLOR_ACCENT_GREEN;
@@ -41,7 +44,7 @@ pub const TEXT_SECONDARY_DARK: egui::Color32 = egui::Color32::from_rgb(0x8e, 0x8
 // Window geometry tokens
 pub const HEADER_HEIGHT: f32 = 34.0;
 pub const TRAFFIC_LIGHTS_INSET: f32 = 78.0;
-pub const CARD_ROUNDING: f32 = 10.0;
+pub const CARD_ROUNDING: f32 = 12.0;
 
 /// Theme color palette container for structured access across UI modules.
 #[derive(Debug, Clone, Copy)]
@@ -153,6 +156,9 @@ const PROPORTIONAL_CANDIDATES: &[&str] = &[
     "/Library/Fonts/SF-Pro-Text-Regular.otf",
     "/Library/Fonts/SF-Pro-Display-Regular.otf",
     "/System/Library/Fonts/SFCompact.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/System/Library/Fonts/Supplemental/Helvetica.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
 ];
 
 /// Candidate file paths for macOS Monospace SF Mono fonts, ordered by preference.

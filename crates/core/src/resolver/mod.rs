@@ -13,8 +13,7 @@ use crate::auth::CookieSource;
 use crate::sidecar::SidecarManager;
 use sanitizer::sanitize_url;
 
-pub use sanitizer::extract_batch_urls;
-pub use sanitizer::Platform;
+pub use sanitizer::{extract_batch_urls, find_url_in_text, Platform};
 pub use types::{MediaManifest, MediaStream, StreamDelivery};
 
 #[derive(Debug, Error)]
@@ -87,8 +86,20 @@ impl Resolver {
         cookie_source: Option<&CookieSource>,
     ) -> Result<MediaManifest, ResolverError> {
         let sanitized = sanitize_url(input)?;
+
+        // Route all Platform::GitHub downloads through the native Rust downloader (never yt-dlp).
+        if sanitized.platform == Platform::GitHub {
+            return match native::try_resolve(&self.client, &sanitized).await {
+                Ok(Some(manifest)) => Ok(manifest),
+                Ok(None) => Err(ResolverError::InvalidUrl(
+                    "GitHub resource or file could not be resolved".to_owned(),
+                )),
+                Err(err) => Err(err),
+            };
+        }
+
         match tokio::time::timeout(
-            Duration::from_millis(100),
+            Duration::from_millis(2500),
             native::try_resolve(&self.client, &sanitized),
         )
         .await
@@ -111,6 +122,10 @@ impl Resolver {
         allow_playlist: bool,
     ) -> Result<Vec<MediaManifest>, crate::CoreError> {
         let sanitized = sanitize_url(input)?;
+        if sanitized.platform == Platform::GitHub {
+            let manifest = self.resolve_with_cookies(input, Some(cookies)).await?;
+            return Ok(vec![manifest]);
+        }
         if should_expand_playlist(&sanitized, allow_playlist) {
             return ytdlp::resolve_all(
                 &self.sidecar,

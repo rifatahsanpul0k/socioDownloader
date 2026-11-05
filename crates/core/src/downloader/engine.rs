@@ -115,11 +115,71 @@ impl DownloadEngine {
                             stream.filesize_bytes,
                             &part,
                             reporter,
-                            cancel,
+                            cancel.clone(),
                         )
                         .await,
                 )?;
-                rename_part(&part, output).await?;
+                if *cancel.borrow() {
+                    return Err(DownloadError::Cancelled);
+                }
+
+                // If audio-only stream and output target is .m4a/.mp3 but source is WebM/Opus,
+                // transcode to clean Apple-compatible AAC/MP3 so Apple Music and QuickTime play it.
+                let ext = output
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let needs_transcode = (ext == "m4a" || ext == "mp3")
+                    && (stream.container == "webm"
+                        || stream.acodec.as_deref().unwrap_or("").contains("opus")
+                        || stream.acodec.as_deref().unwrap_or("").contains("vorbis"));
+
+                if needs_transcode {
+                    reporter.emit(DownloadPhase::Muxing, true).await;
+                    let transcode_part = fs::auxiliary_part_path(output, "audio_conv");
+                    guard.track(&transcode_part);
+                    let mut args = vec![
+                        "-y".to_owned(),
+                        "-i".to_owned(),
+                        part.to_string_lossy().into_owned(),
+                        "-vn".to_owned(),
+                    ];
+                    if ext == "mp3" {
+                        args.extend([
+                            "-c:a".to_owned(),
+                            "libmp3lame".to_owned(),
+                            "-b:a".to_owned(),
+                            "256k".to_owned(),
+                        ]);
+                    } else {
+                        args.extend([
+                            "-c:a".to_owned(),
+                            "aac".to_owned(),
+                            "-b:a".to_owned(),
+                            "256k".to_owned(),
+                            "-f".to_owned(),
+                            "ipod".to_owned(),
+                        ]);
+                    }
+                    args.extend([
+                        "-loglevel".to_owned(),
+                        "error".to_owned(),
+                        transcode_part.to_string_lossy().into_owned(),
+                    ]);
+                    run_ffmpeg(
+                        &self.sidecar.binary_path(FFMPEG_BINARY_NAME),
+                        args,
+                        cancel,
+                        reporter,
+                    )
+                    .await?;
+                    rename_part(&transcode_part, output).await?;
+                    fs::remove_if_present(&part).await;
+                } else {
+                    rename_part(&part, output).await?;
+                }
+
                 guard.disarm();
                 Ok(output.to_path_buf())
             }
@@ -172,8 +232,16 @@ impl DownloadEngine {
                         video_part.to_string_lossy().into_owned(),
                         "-i".to_owned(),
                         audio_part.to_string_lossy().into_owned(),
-                        "-c".to_owned(),
+                        "-map".to_owned(),
+                        "0:v:0".to_owned(),
+                        "-map".to_owned(),
+                        "1:a:0".to_owned(),
+                        "-c:v".to_owned(),
                         "copy".to_owned(),
+                        "-c:a".to_owned(),
+                        "aac".to_owned(),
+                        "-b:a".to_owned(),
+                        "192k".to_owned(),
                         "-movflags".to_owned(),
                         "+faststart".to_owned(),
                         "-f".to_owned(),

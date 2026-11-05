@@ -17,6 +17,15 @@ use rust_dl_core::{BrowserKind, CookieSource, Resolver, SidecarManager};
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{mpsc, watch};
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SimpleFormatMode {
+    #[default]
+    HdVideo,
+    Max4k,
+    AudioOnly,
+}
+
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum QualityMode {
     Best,
@@ -26,6 +35,7 @@ enum QualityMode {
     Ask,
 }
 
+#[allow(dead_code)]
 impl QualityMode {
     fn label(self) -> &'static str {
         match self {
@@ -51,12 +61,16 @@ struct RustDlApp {
     handle: Handle,
     queue: QueueManager,
     resolver: Resolver,
+    #[allow(dead_code)]
     sidecar: SidecarManager,
     staging: staging::StagingState,
     staging_sender: std_mpsc::Sender<staging::StagingEvent>,
     staging_receiver: std_mpsc::Receiver<staging::StagingEvent>,
     input: String,
     quality: QualityMode,
+    format_mode: SimpleFormatMode,
+    show_help: bool,
+    show_settings: bool,
     auto_capture: bool,
     allow_playlists: bool,
     config: AppConfig,
@@ -86,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     eframe::run_native(
-        "rust-dl",
+        "Media Saver",
         options,
         Box::new(move |cc| {
             theme::setup_system_fonts(&cc.egui_ctx);
@@ -173,17 +187,17 @@ impl RustDlApp {
 
         let (staging_sender, staging_receiver) = std_mpsc::channel();
 
-        let status = Arc::new(Mutex::new("Checking media tools...".to_owned()));
+        let status = Arc::new(Mutex::new("Ready".to_owned()));
         let bootstrap_status = Arc::clone(&status);
         let sidecar = bundle.sidecar.clone();
         bundle.handle.spawn(async move {
-            set_status(&bootstrap_status, "Preparing media tools...");
+            set_status(&bootstrap_status, "First-time setup...");
             let (progress_sender, progress_receiver) = mpsc::channel(1);
             drop(progress_receiver);
             let result = sidecar.ensure_binaries(progress_sender).await;
             match result {
-                Ok(()) => set_status(&bootstrap_status, "Media tools ready"),
-                Err(error) => set_status(&bootstrap_status, &format!("Sidecar error: {error}")),
+                Ok(()) => set_status(&bootstrap_status, "Ready"),
+                Err(_) => set_status(&bootstrap_status, "Setup error. Check internet connection."),
             }
         });
 
@@ -197,6 +211,9 @@ impl RustDlApp {
             staging_receiver,
             input: String::new(),
             quality: quality_from_preset(&bundle.config.quality_preset),
+            format_mode: SimpleFormatMode::HdVideo,
+            show_help: false,
+            show_settings: false,
             auto_capture: bundle.config.auto_clipboard,
             allow_playlists: bundle.config.allow_playlists,
             config: bundle.config,
@@ -304,12 +321,40 @@ impl RustDlApp {
         });
     }
 
+    fn start_download(&mut self, text: String) {
+        let clean = match rust_dl_core::find_url_in_text(&text) {
+            Some(url) => url.to_owned(),
+            None => text.trim().to_owned(),
+        };
+        if clean.is_empty() {
+            return;
+        }
+        let queue = self.queue.clone();
+        let format_mode = self.format_mode;
+        let allow_playlists = self.allow_playlists;
+        let status = Arc::clone(&self.status);
+        self.handle.spawn(async move {
+            let (max_height, audio_only) = match format_mode {
+                SimpleFormatMode::HdVideo => (Some(1080), false),
+                SimpleFormatMode::Max4k => (None, false),
+                SimpleFormatMode::AudioOnly => (None, true),
+            };
+            if let Err(error) = queue
+                .enqueue_batch_auto(clean, max_height, audio_only, allow_playlists)
+                .await
+            {
+                set_status(&status, &error.to_string());
+            }
+        });
+    }
+
     fn paste_and_download(&mut self) {
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
             Ok(text) => {
-                self.input = text.trim().to_owned();
-                if !self.input.is_empty() {
-                    self.start_staging(self.input.clone());
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    self.input.clear();
+                    self.start_download(trimmed.to_owned());
                 }
             }
             Err(error) => set_status(&self.status, &format!("Clipboard unavailable: {error}")),
@@ -386,7 +431,7 @@ impl RustDlApp {
         }
         while let Ok(url) = self.clipboard_receiver.try_recv() {
             if self.auto_capture {
-                self.start_staging(url);
+                self.start_download(url);
             }
         }
     }
@@ -425,6 +470,7 @@ impl RustDlApp {
         self.save_config();
     }
 
+    #[allow(dead_code)]
     fn apply_quality(&mut self, quality: QualityMode) {
         if self.quality == quality {
             return;
@@ -444,6 +490,7 @@ impl RustDlApp {
         self.save_config();
     }
 
+    #[allow(dead_code)]
     fn apply_allow_playlists(&mut self, enabled: bool) {
         if self.allow_playlists == enabled {
             return;
@@ -453,6 +500,7 @@ impl RustDlApp {
         self.save_config();
     }
 
+    #[allow(dead_code)]
     fn update_extractors(&self) {
         let sidecar = self.sidecar.clone();
         let status = Arc::clone(&self.status);
@@ -479,16 +527,16 @@ impl RustDlApp {
         let dropped = context.input(|input| input.raw.dropped_files.clone());
         for file in dropped {
             if file.name.starts_with("http://") || file.name.starts_with("https://") {
-                self.start_staging(file.name);
+                self.start_download(file.name);
             } else if let Some(path) = file.path {
                 if path.to_string_lossy().starts_with("http://")
                     || path.to_string_lossy().starts_with("https://")
                 {
-                    self.start_staging(path.to_string_lossy().into_owned());
+                    self.start_download(path.to_string_lossy().into_owned());
                     continue;
                 }
                 match std::fs::read_to_string(&path) {
-                    Ok(contents) => self.start_staging(contents),
+                    Ok(contents) => self.start_download(contents),
                     Err(error) => set_status(
                         &self.status,
                         &format!("Could not read dropped file: {error}"),
@@ -496,7 +544,7 @@ impl RustDlApp {
                 }
             } else if let Some(bytes) = file.bytes {
                 match String::from_utf8(bytes.to_vec()) {
-                    Ok(contents) => self.start_staging(contents),
+                    Ok(contents) => self.start_download(contents),
                     Err(_) => set_status(&self.status, "Dropped data was not UTF-8 text"),
                 }
             }
@@ -514,7 +562,7 @@ impl RustDlApp {
         });
         for text in pasted {
             if !text.trim().is_empty() {
-                self.start_staging(text);
+                self.start_download(text);
             }
         }
     }
@@ -533,96 +581,53 @@ impl eframe::App for RustDlApp {
         self.drain_events();
         self.handle_dropped_input(context);
         let mut input_focused = false;
+
         egui::TopBottomPanel::top("top_header")
             .exact_height(theme::HEADER_HEIGHT)
             .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
             .show(context, |ui| {
-                theme::render_macos_top_header(ui, "rust-dl");
+                theme::render_macos_top_header(ui, "Media Saver");
             });
+
         egui::TopBottomPanel::top("top_bar").show(context, |ui| {
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.label(status_text(&self.status));
-            });
-            ui.horizontal(|ui| {
-                let input = ui.add(
-                    egui::TextEdit::singleline(&mut self.input)
-                        .hint_text("Paste a media URL")
-                        .desired_width(500.0),
-                );
-                input_focused = input.has_focus();
-                if (input.lost_focus() || input_focused) && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    let text = self.input.trim().to_owned();
-                    if !text.is_empty() {
-                        self.start_staging(text);
+                ui.label(RichText::new("Media Saver").strong().size(15.0));
+                ui.add_space(8.0);
+
+                let status = status_text(&self.status);
+                let (dot_color, dot_label) = if status == "Ready" {
+                    (theme::COLOR_ACCENT_GREEN, "● Ready")
+                } else if status.contains("setup")
+                    || status.contains("Preparing")
+                    || status.contains("Checking")
+                {
+                    (theme::COLOR_ACCENT_INDIGO, "● First-time setup...")
+                } else {
+                    (theme::COLOR_ACCENT_AMBER, status.as_str())
+                };
+                ui.label(RichText::new(dot_label).color(dot_color).size(12.0));
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⚙ Settings").clicked() {
+                        self.show_settings = !self.show_settings;
                     }
-                }
-                if ui.button("Paste & Download").clicked() {
-                    self.paste_and_download();
-                }
+                    if ui.button("❓ Help").clicked() {
+                        self.show_help = !self.show_help;
+                    }
+                    if ui
+                        .button(if self.show_history {
+                            "Queue"
+                        } else {
+                            "History"
+                        })
+                        .clicked()
+                    {
+                        self.show_history = !self.show_history;
+                    }
+                });
             });
-            ui.horizontal(|ui| {
-                let mut quality = self.quality;
-                egui::ComboBox::from_label("Quality")
-                    .selected_text(quality.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut quality,
-                            QualityMode::Best,
-                            QualityMode::Best.label(),
-                        );
-                        ui.selectable_value(
-                            &mut quality,
-                            QualityMode::Max1080,
-                            QualityMode::Max1080.label(),
-                        );
-                        ui.selectable_value(
-                            &mut quality,
-                            QualityMode::Max720,
-                            QualityMode::Max720.label(),
-                        );
-                        ui.selectable_value(
-                            &mut quality,
-                            QualityMode::AudioOnly,
-                            QualityMode::AudioOnly.label(),
-                        );
-                        ui.selectable_value(
-                            &mut quality,
-                            QualityMode::Ask,
-                            QualityMode::Ask.label(),
-                        );
-                    });
-                if quality != self.quality {
-                    self.apply_quality(quality);
-                }
-                let mut auto_capture = self.auto_capture;
-                if ui
-                    .checkbox(&mut auto_capture, "Auto-Capture Clipboard Links")
-                    .changed()
-                {
-                    self.apply_auto_capture(auto_capture);
-                }
-                let mut allow_playlists = self.allow_playlists;
-                if ui
-                    .checkbox(&mut allow_playlists, "Expand Playlists / Carousels")
-                    .changed()
-                {
-                    self.apply_allow_playlists(allow_playlists);
-                }
-                if ui.button("Update Extractors (yt-dlp)").clicked() {
-                    self.update_extractors();
-                }
-                if ui
-                    .button(if self.show_history {
-                        "Queue"
-                    } else {
-                        "History"
-                    })
-                    .clicked()
-                {
-                    self.show_history = !self.show_history;
-                }
-            });
-            self.render_settings(ui);
+            ui.add_space(2.0);
         });
 
         let paste_shortcut = context.input(|input| {
@@ -636,77 +641,158 @@ impl eframe::App for RustDlApp {
             if self.show_history {
                 self.render_history(ui);
             } else {
-                if !self.staging.is_idle() {
-                    let queue = self.queue.clone();
-                    let handle = self.handle.clone();
-                    let allow_playlists = self.allow_playlists;
-                    staging::render_staging_card(ui, &mut self.staging, |url, format_id| {
-                        handle.spawn(async move {
-                            match queue.enqueue_batch_for_selection(url.clone(), allow_playlists).await {
-                                Ok(job_ids) => {
-                                    for id in job_ids {
-                                        let _ = queue.start_job(id, Some(format_id.clone()));
-                                    }
+                // Hero Action Card (Heuristics #1, #2, #5, #7, #8)
+                egui::Frame::none()
+                    .fill(if ui.visuals().dark_mode {
+                        egui::Color32::from_rgb(34, 34, 38)
+                    } else {
+                        egui::Color32::from_rgb(255, 255, 255)
+                    })
+                    .rounding(egui::Rounding::same(12.0))
+                    .inner_margin(egui::Margin::same(16.0))
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        if ui.visuals().dark_mode {
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 25)
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 20)
+                        },
+                    ))
+                    .shadow(egui::epaint::Shadow {
+                        offset: egui::vec2(0.0, 2.0),
+                        blur: 8.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(25),
+                    })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let available_w = ui.available_width() - 175.0;
+                            let input = ui.add(
+                                egui::TextEdit::singleline(&mut self.input)
+                                    .hint_text("Paste any YouTube, Instagram, Pinterest, Facebook, or GitHub link...")
+                                    .desired_width(available_w.max(260.0)),
+                            );
+                            input_focused = input.has_focus();
+                            if (input.lost_focus() || input_focused)
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            {
+                                let text = self.input.trim().to_owned();
+                                if !text.is_empty() {
+                                    self.input.clear();
+                                    self.start_download(text);
+                                } else {
+                                    self.paste_and_download();
                                 }
-                                Err(_) => {
-                                    let _ = queue.enqueue_batch_auto(url, None, false, allow_playlists).await;
+                            }
+
+                            let btn = egui::Button::new(
+                                RichText::new("📋 Paste & Download").strong().color(egui::Color32::WHITE),
+                            )
+                            .fill(theme::COLOR_ACCENT_BLUE)
+                            .rounding(egui::Rounding::same(8.0))
+                            .min_size(egui::vec2(165.0, 32.0));
+                            if ui.add(btn).clicked() {
+                                if self.input.trim().is_empty() {
+                                    self.paste_and_download();
+                                } else {
+                                    let text = std::mem::take(&mut self.input);
+                                    self.start_download(text);
+                                }
+                            }
+                        });
+
+                        ui.add_space(10.0);
+
+                        // 3 Simple Format Pills
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Format:")
+                                    .size(12.0)
+                                    .color(theme::TEXT_SECONDARY_DARK),
+                            );
+                            ui.add_space(4.0);
+
+                            for (mode, label) in [
+                                (SimpleFormatMode::HdVideo, "🎬 Video (HD)"),
+                                (SimpleFormatMode::Max4k, "✨ Video (4K Max)"),
+                                (SimpleFormatMode::AudioOnly, "🎵 Audio Only"),
+                            ] {
+                                let is_selected = self.format_mode == mode;
+                                let bg_color = if is_selected {
+                                    theme::COLOR_ACCENT_BLUE
+                                } else if ui.visuals().dark_mode {
+                                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 18)
+                                } else {
+                                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 15)
+                                };
+                                let text_color = if is_selected {
+                                    egui::Color32::WHITE
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+
+                                let pill = egui::Button::new(
+                                    RichText::new(label).size(12.0).color(text_color),
+                                )
+                                .fill(bg_color)
+                                .rounding(egui::Rounding::same(14.0));
+                                if ui.add(pill).clicked() {
+                                    self.format_mode = mode;
                                 }
                             }
                         });
                     });
-                    ui.add_space(12.0);
-                }
 
-                if self.jobs.is_empty() && self.staging.is_idle() {
+                ui.add_space(16.0);
+
+                if self.jobs.is_empty() {
                     ui.vertical_centered(|ui| {
-                        ui.add_space(60.0);
-                        ui.heading(RichText::new("rust-dl").size(24.0).strong());
-                        ui.add_space(8.0);
+                        ui.add_space(40.0);
                         ui.label(
-                            RichText::new("Ultra-lightweight macOS Media Downloader")
-                                .size(14.0)
-                                .color(theme::TEXT_SECONDARY_DARK),
+                            RichText::new("⬇")
+                                .size(48.0)
+                                .color(theme::COLOR_ACCENT_BLUE),
                         );
-                        ui.add_space(20.0);
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("📋 Paste & Download (⌘V)").size(14.0),
-                                )
-                                .min_size(egui::vec2(220.0, 38.0)),
-                            )
-                            .clicked()
-                        {
-                            self.paste_and_download();
-                        }
-                        ui.add_space(16.0);
+                        ui.add_space(10.0);
+                        ui.heading(RichText::new("Ready to Download").size(22.0).strong());
+                        ui.add_space(6.0);
                         ui.label(
                             RichText::new(
-                                "Supports YouTube (4K/1080p DASH with audio), Instagram, and direct media URLs",
+                                "Copy any video or file link and press ⌘V, or paste it above.",
                             )
-                            .size(12.0)
+                            .size(13.5)
                             .color(theme::TEXT_SECONDARY_DARK),
                         );
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("🎬 Auto DASH Video + Audio Muxing")
-                                    .size(11.0)
-                                    .color(theme::COLOR_ACCENT_BLUE),
-                            );
-                            ui.label(
-                                RichText::new("•")
-                                    .size(11.0)
-                                    .color(theme::TEXT_SECONDARY_DARK),
-                            );
-                            ui.label(
-                                RichText::new("⚡ Multi-chunk Parallel Range Workers")
-                                    .size(11.0)
-                                    .color(theme::COLOR_ACCENT_GREEN),
-                            );
+                        ui.add_space(24.0);
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                            for (icon, name, color) in [
+                                ("▶", "YouTube (HD/4K with Sound)", egui::Color32::from_rgb(255, 59, 48)),
+                                ("📷", "Instagram Reels & Posts", egui::Color32::from_rgb(175, 82, 222)),
+                                ("📌", "Pinterest Pins & Media", egui::Color32::from_rgb(230, 0, 35)),
+                                ("📘", "Facebook Videos", egui::Color32::from_rgb(0, 122, 255)),
+                                ("🐙", "GitHub Releases, Files & Zips", egui::Color32::from_rgb(140, 95, 230)),
+                                ("📦", "Direct Media & Files", egui::Color32::from_rgb(142, 142, 147)),
+                            ] {
+                                egui::Frame::none()
+                                    .fill(if ui.visuals().dark_mode {
+                                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 12)
+                                    } else {
+                                        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 8)
+                                    })
+                                    .rounding(egui::Rounding::same(8.0))
+                                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(icon).color(color).size(13.0));
+                                            ui.label(RichText::new(name).size(12.0));
+                                        });
+                                    });
+                            }
                         });
                     });
-                } else if !self.jobs.is_empty() {
+                } else {
                     if self.jobs.len() > 1 {
                         ui.horizontal(|ui| {
                             if ui.button("Clear Completed").clicked() {
@@ -722,6 +808,7 @@ impl eframe::App for RustDlApp {
                                 });
                             }
                         });
+                        ui.add_space(8.0);
                     }
                     let mut jobs: Vec<QueueJob> = self.jobs.values().cloned().collect();
                     jobs.sort_by_key(|job| job.id);
@@ -758,7 +845,7 @@ impl eframe::App for RustDlApp {
                         let on_open_cookies = {
                             let status = Arc::clone(&self.status);
                             move || {
-                                set_status(&status, "Select a Browser Cookie source in Settings above");
+                                set_status(&status, "Select your browser in Settings (⚙) to enable cookies");
                             }
                         };
 
@@ -774,11 +861,156 @@ impl eframe::App for RustDlApp {
                 }
             }
         });
+
+        // Modals
+        if self.show_help {
+            egui::Window::new("Help & Tips")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(460.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(context, |ui| {
+                    ui.spacing_mut().item_spacing.y = 10.0;
+                    ui.label(RichText::new("How to Download").strong().size(14.0));
+                    ui.label(
+                        "Copy any video or file link from your web browser or another app. Then press ⌘V inside Media Saver or click 'Paste & Download'.",
+                    );
+                    ui.separator();
+                    ui.label(RichText::new("Apple QuickTime Ready").strong().size(14.0));
+                    ui.label(
+                        "All downloaded videos are automatically packaged with crystal-clear AAC audio so they play immediately in macOS QuickTime Player and on your iPhone.",
+                    );
+                    ui.separator();
+                    ui.label(RichText::new("Private & Age-Restricted Content").strong().size(14.0));
+                    ui.label(
+                        "If a video requires you to be logged in, click Settings (⚙) and select your web browser under 'Browser Cookies'. Media Saver will safely use your session to download it.",
+                    );
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Got It").clicked() {
+                            self.show_help = false;
+                        }
+                    });
+                });
+        }
+
+        if self.show_settings {
+            egui::Window::new("Preferences")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(480.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(context, |ui| {
+                    ui.spacing_mut().item_spacing.y = 12.0;
+
+                    // Download folder
+                    ui.label(RichText::new("Download Location").strong().size(13.5));
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(self.config.download_dir.display().to_string())
+                                .size(12.0)
+                                .color(theme::TEXT_SECONDARY_DARK),
+                        );
+                        if ui.button("Open in Finder").clicked() {
+                            let _ = std::process::Command::new("open")
+                                .arg(&self.config.download_dir)
+                                .status();
+                        }
+                    });
+
+                    ui.separator();
+
+                    // Browser Cookies
+                    ui.label(RichText::new("Browser Cookies (For Private Videos)").strong().size(13.5));
+                    ui.label(
+                        RichText::new("Select your web browser to download videos requiring sign-in.")
+                            .size(11.5)
+                            .color(theme::TEXT_SECONDARY_DARK),
+                    );
+                    let mut source = self.config.cookie_source.clone();
+                    egui::ComboBox::from_id_salt("cookie_source")
+                        .selected_text(cookie_source_label(&source))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut source, CookieSource::None, "Off (Default)");
+                            for browser in [
+                                BrowserKind::Safari,
+                                BrowserKind::Chrome,
+                                BrowserKind::Arc,
+                                BrowserKind::Brave,
+                                BrowserKind::Firefox,
+                                BrowserKind::Edge,
+                            ] {
+                                ui.selectable_value(
+                                    &mut source,
+                                    CookieSource::Browser(browser),
+                                    browser.to_string(),
+                                );
+                            }
+                            ui.selectable_value(
+                                &mut source,
+                                CookieSource::CookieFile(std::path::PathBuf::new()),
+                                "Custom File...",
+                            );
+                        });
+                    if let CookieSource::CookieFile(path) = &mut source {
+                        let mut path_text = path.to_string_lossy().into_owned();
+                        ui.add(egui::TextEdit::singleline(&mut path_text).hint_text("cookies.txt"));
+                        *path = std::path::PathBuf::from(path_text);
+                    }
+                    if source != self.config.cookie_source {
+                        self.apply_cookie_source(source);
+                    }
+
+                    ui.separator();
+
+                    // Simultaneous Downloads
+                    ui.label(RichText::new("Simultaneous Downloads").strong().size(13.5));
+                    let mut concurrency = self.config.max_concurrent_downloads;
+                    egui::ComboBox::from_id_salt("concurrency")
+                        .selected_text(format!("{} at a time", concurrency))
+                        .show_ui(ui, |ui| {
+                            for value in 1..=8 {
+                                ui.selectable_value(&mut concurrency, value, format!("{} at a time", value));
+                            }
+                        });
+                    if concurrency != self.config.max_concurrent_downloads {
+                        self.config.max_concurrent_downloads = concurrency;
+                        let queue = self.queue.clone();
+                        self.handle.spawn(async move {
+                            queue.set_max_concurrent_downloads(concurrency).await;
+                        });
+                        self.save_config();
+                    }
+
+                    ui.separator();
+
+                    // Auto-Capture Clipboard
+                    let mut auto_capture = self.auto_capture;
+                    if ui
+                        .checkbox(
+                            &mut auto_capture,
+                            "Automatically detect copied media links in background",
+                        )
+                        .changed()
+                    {
+                        self.apply_auto_capture(auto_capture);
+                    }
+
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Done").clicked() {
+                            self.show_settings = false;
+                        }
+                    });
+                });
+        }
+
         context.request_repaint_after(Duration::from_millis(100));
     }
 }
 
 impl RustDlApp {
+    #[allow(dead_code)]
     fn render_settings(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let mut source = self.config.cookie_source.clone();
@@ -871,6 +1103,7 @@ impl RustDlApp {
     }
 }
 
+#[allow(dead_code)]
 fn quality_from_preset(preset: &str) -> QualityMode {
     match preset {
         "1080p" => QualityMode::Max1080,
@@ -881,6 +1114,7 @@ fn quality_from_preset(preset: &str) -> QualityMode {
     }
 }
 
+#[allow(dead_code)]
 fn quality_preset(quality: QualityMode) -> &'static str {
     match quality {
         QualityMode::Best => "best",

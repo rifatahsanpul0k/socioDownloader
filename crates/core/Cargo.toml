@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 dirs.workspace = true
+percent-encoding.workspace = true
 reqwest.workspace = true
 scraper.workspace = true
 serde.workspace = true
