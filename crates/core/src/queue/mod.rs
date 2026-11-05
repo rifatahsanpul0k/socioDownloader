@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock, Semaphore};
 use crate::auth::CookieSource;
 use crate::downloader::{DownloadEngine, DownloadError};
 use crate::resolver::sanitizer::{extract_batch_urls, sanitize_url};
-use crate::resolver::{MediaManifest, MediaStream, Platform, Resolver};
+use crate::resolver::{MediaManifest, MediaStream, Platform, Resolver, StreamDelivery};
 
 pub use types::{JobId, JobStatus, QueueEvent, QueueJob};
 
@@ -571,18 +571,95 @@ async fn wait_for_cancel(mut receiver: watch::Receiver<bool>) -> bool {
     receiver.changed().await.is_ok() && *receiver.borrow()
 }
 
+fn is_pure_audio_stream(stream: &MediaStream) -> bool {
+    let no_vcodec = stream
+        .vcodec
+        .as_deref()
+        .map(|v| v == "none" || v.is_empty())
+        .unwrap_or(true);
+    let has_acodec = stream
+        .acodec
+        .as_deref()
+        .map(|a| a != "none" && !a.is_empty())
+        .unwrap_or(false);
+    let audio_container = matches!(
+        stream.container.as_str(),
+        "m4a" | "mp3" | "aac" | "opus" | "ogg" | "flac" | "wav"
+    );
+    (no_vcodec && has_acodec) || (no_vcodec && audio_container)
+}
+
 fn choose_stream(
     manifest: &MediaManifest,
     audio_only: bool,
     max_height: Option<u32>,
 ) -> Option<MediaStream> {
     if audio_only {
-        return manifest
+        // 1. Dedicated audio-only stream (preferring Apple-compatible m4a / AAC)
+        let pure_audio_streams: Vec<&MediaStream> = manifest
             .streams
             .iter()
-            .find(|stream| stream.vcodec.is_none() && stream.acodec.is_some())
-            .cloned();
+            .filter(|stream| is_pure_audio_stream(stream))
+            .collect();
+
+        if let Some(preferred) = pure_audio_streams.iter().find(|s| {
+            s.container == "m4a"
+                || s.acodec
+                    .as_deref()
+                    .map(|a| a.contains("aac") || a.contains("mp4a"))
+                    .unwrap_or(false)
+        }) {
+            return Some((*preferred).clone());
+        }
+
+        if let Some(first_audio) = pure_audio_streams.first() {
+            return Some((*first_audio).clone());
+        }
+
+        // 2. SplitDash stream: extract the audio stream from audio_url directly
+        for stream in &manifest.streams {
+            if let StreamDelivery::SplitDash { audio_url, .. } = &stream.delivery {
+                return Some(MediaStream {
+                    format_id: format!("{}_audio", stream.format_id),
+                    delivery: StreamDelivery::Direct {
+                        url: audio_url.clone(),
+                    },
+                    container: "m4a".to_owned(),
+                    resolution: None,
+                    fps: None,
+                    filesize_bytes: None,
+                    vcodec: None,
+                    acodec: stream.acodec.clone().or_else(|| Some("aac".to_owned())),
+                    headers: stream.headers.clone(),
+                });
+            }
+        }
+
+        // 3. Multiplexed video with audio (e.g. Instagram Reels, Facebook, Pinterest)
+        // Mark container as m4a so downloader engine extracts the audio cleanly
+        for stream in &manifest.streams {
+            let has_audio = stream
+                .acodec
+                .as_deref()
+                .map(|a| a != "none" && !a.is_empty())
+                .unwrap_or(true);
+            if has_audio && stream.container != "jpg" && stream.container != "png" {
+                let mut audio_derived = stream.clone();
+                audio_derived.container = "m4a".to_owned();
+                return Some(audio_derived);
+            }
+        }
+
+        // 4. Fallback: First stream if available
+        if let Some(first) = manifest.streams.first() {
+            let mut audio_derived = first.clone();
+            audio_derived.container = "m4a".to_owned();
+            return Some(audio_derived);
+        }
+
+        return None;
     }
+
     if let Some(max_height) = max_height {
         if let Some(stream) = manifest.streams.iter().find(|stream| {
             stream
@@ -650,6 +727,71 @@ mod tests {
             choose_stream(&manifest, false, Some(720)).map(|stream| stream.format_id),
             Some("720".to_owned())
         );
+    }
+
+    #[test]
+    fn selects_audio_when_vcodec_is_some_none_or_splitdash() {
+        // Case 1: yt-dlp style format where vcodec is "none" string
+        let manifest_none_str = MediaManifest {
+            id: "id1".to_owned(),
+            title: "title".to_owned(),
+            uploader: "uploader".to_owned(),
+            duration_secs: None,
+            thumbnail_url: None,
+            platform: Platform::YouTube,
+            streams: vec![
+                stream("1080", Some("1920x1080"), Some("h264"), Some("aac")),
+                stream("audio-140", None, Some("none"), Some("mp4a.40.2")),
+            ],
+        };
+        assert_eq!(
+            choose_stream(&manifest_none_str, true, None).map(|s| s.format_id),
+            Some("audio-140".to_owned())
+        );
+
+        // Case 2: Only SplitDash stream available
+        let splitdash_stream = MediaStream {
+            format_id: "137+140".to_owned(),
+            delivery: StreamDelivery::SplitDash {
+                video_url: "https://example.test/video".to_owned(),
+                audio_url: "https://example.test/audio".to_owned(),
+            },
+            container: "mp4".to_owned(),
+            resolution: Some("1920x1080".to_owned()),
+            fps: Some(30.0),
+            filesize_bytes: Some(100),
+            vcodec: Some("h264".to_owned()),
+            acodec: Some("aac".to_owned()),
+            headers: HashMap::new(),
+        };
+        let manifest_split = MediaManifest {
+            id: "id2".to_owned(),
+            title: "title".to_owned(),
+            uploader: "uploader".to_owned(),
+            duration_secs: None,
+            thumbnail_url: None,
+            platform: Platform::YouTube,
+            streams: vec![splitdash_stream],
+        };
+        let audio_res = choose_stream(&manifest_split, true, None);
+        assert!(audio_res.is_some());
+        let a = audio_res.unwrap();
+        assert_eq!(a.container, "m4a");
+        assert!(matches!(a.delivery, StreamDelivery::Direct { .. }));
+
+        // Case 3: Multiplexed Instagram video
+        let manifest_insta = MediaManifest {
+            id: "id3".to_owned(),
+            title: "reel".to_owned(),
+            uploader: "uploader".to_owned(),
+            duration_secs: None,
+            thumbnail_url: None,
+            platform: Platform::Instagram,
+            streams: vec![stream("reel_video", Some("1080x1920"), Some("h264"), Some("aac"))],
+        };
+        let insta_audio = choose_stream(&manifest_insta, true, None);
+        assert!(insta_audio.is_some());
+        assert_eq!(insta_audio.unwrap().container, "m4a");
     }
 
     fn stream(

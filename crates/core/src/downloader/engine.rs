@@ -123,17 +123,26 @@ impl DownloadEngine {
                     return Err(DownloadError::Cancelled);
                 }
 
-                // If audio-only stream and output target is .m4a/.mp3 but source is WebM/Opus,
-                // transcode to clean Apple-compatible AAC/MP3 so Apple Music and QuickTime play it.
+                // If audio-only stream and output target is .m4a/.mp3 but source is WebM/Opus
+                // or a multiplexed video file, transcode/strip video to clean Apple-compatible
+                // AAC/MP3 so Apple Music and QuickTime play it cleanly.
                 let ext = output
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or_default()
                     .to_ascii_lowercase();
+                let has_video = stream
+                    .vcodec
+                    .as_deref()
+                    .map(|v| v != "none" && !v.is_empty())
+                    .unwrap_or(false)
+                    || stream.resolution.is_some();
                 let needs_transcode = (ext == "m4a" || ext == "mp3")
-                    && (stream.container == "webm"
+                    && (has_video
+                        || stream.container == "webm"
                         || stream.acodec.as_deref().unwrap_or("").contains("opus")
-                        || stream.acodec.as_deref().unwrap_or("").contains("vorbis"));
+                        || stream.acodec.as_deref().unwrap_or("").contains("vorbis")
+                        || (ext == "mp3" && stream.container != "mp3"));
 
                 if needs_transcode {
                     reporter.emit(DownloadPhase::Muxing, true).await;

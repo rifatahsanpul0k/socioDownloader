@@ -385,7 +385,17 @@ fn normalize_container(extension: &str) -> Option<String> {
 }
 
 fn normalize_codec(codec: Option<String>) -> Option<String> {
-    codec.map(|value| value.to_ascii_lowercase())
+    match codec {
+        Some(value) => {
+            let lower = value.to_ascii_lowercase();
+            if lower == "none" || lower.is_empty() {
+                None
+            } else {
+                Some(lower)
+            }
+        }
+        None => None,
+    }
 }
 
 fn combined_size(video: Option<u64>, audio: Option<u64>) -> Option<u64> {
